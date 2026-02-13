@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import { AnimatePresence, motion } from "framer-motion";
 import type { ChannelInfo } from "@/api/client";
 import type { ActiveBranch, ActiveWorker, ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { LiveDuration } from "@/components/LiveDuration";
@@ -140,28 +141,37 @@ export function ChannelCard({
 
 			{/* Message stream */}
 			{visible.length > 0 && (
-				<div className="flex flex-col gap-1 border-t border-app-line/50 p-3">
+				<div className="flex flex-col border-t border-app-line/50 p-3">
 					{messages.length > VISIBLE_MESSAGES && (
 						<span className="mb-1 text-tiny text-ink-faint">
 							{messages.length - VISIBLE_MESSAGES} earlier messages
 						</span>
 					)}
-					{visible.map((message) => {
-						if (message.type !== "message") return null;
-						return (
-							<div key={message.id} className="flex gap-2 text-sm">
-								<span className="flex-shrink-0 text-tiny text-ink-faint">
-									{formatTimestamp(new Date(message.created_at).getTime())}
-								</span>
-								<span className={`flex-shrink-0 text-tiny font-medium ${
-									message.role === "user" ? "text-accent-faint" : "text-green-400"
-								}`}>
-									{message.role === "user" ? (message.sender_name ?? "user") : "bot"}
-								</span>
-								<p className="line-clamp-1 text-sm text-ink-dul">{message.content}</p>
-							</div>
-						);
-					})}
+					<AnimatePresence initial={false}>
+						{visible.map((message) => {
+							if (message.type !== "message") return null;
+							return (
+								<motion.div
+									key={message.id}
+									initial={{ opacity: 0, height: 0, marginTop: 0 }}
+									animate={{ opacity: 1, height: "auto", marginTop: 4 }}
+									exit={{ opacity: 0, height: 0, marginTop: 0 }}
+									transition={{ type: "spring", stiffness: 500, damping: 35 }}
+									className="flex gap-2 overflow-hidden text-sm first:!mt-0"
+								>
+									<span className="flex-shrink-0 text-tiny text-ink-faint">
+										{formatTimestamp(new Date(message.created_at).getTime())}
+									</span>
+									<span className={`flex-shrink-0 text-tiny font-medium ${
+										message.role === "user" ? "text-accent-faint" : "text-green-400"
+									}`}>
+										{message.role === "user" ? (message.sender_name ?? "user") : "bot"}
+									</span>
+									<p className="line-clamp-1 text-sm text-ink-dul">{message.content}</p>
+								</motion.div>
+							);
+						})}
+					</AnimatePresence>
 				</div>
 			)}
 		</Link>

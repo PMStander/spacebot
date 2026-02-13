@@ -193,7 +193,7 @@ pub struct OpenCodeConfig {
 impl Default for OpenCodeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             path: "opencode".to_string(),
             max_servers: 5,
             server_startup_timeout_secs: 30,
