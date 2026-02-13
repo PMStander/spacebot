@@ -374,8 +374,9 @@ pub struct Binding {
     pub agent_id: String,
     pub channel: String,
     pub guild_id: Option<String>,
+    pub workspace_id: Option<String>, // Slack workspace (team) ID
     pub chat_id: Option<String>,
-    /// Discord channel IDs this binding applies to. If empty, all channels in the guild are allowed.
+    /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
 }
 
@@ -397,6 +398,16 @@ impl Binding {
             }
         }
 
+        if let Some(workspace_id) = &self.workspace_id {
+            let message_workspace = message
+                .metadata
+                .get("slack_workspace_id")
+                .and_then(|v| v.as_str());
+            if message_workspace != Some(workspace_id) {
+                return false;
+            }
+        }
+
         if !self.channel_ids.is_empty() {
             let message_channel = message
                 .metadata
@@ -409,9 +420,16 @@ impl Binding {
                 .and_then(|v| v.as_u64())
                 .map(|v| v.to_string());
 
+            // Also check Slack channel IDs
+            let slack_channel = message
+                .metadata
+                .get("slack_channel_id")
+                .and_then(|v| v.as_str());
+
             let direct_match = message_channel
                 .as_ref()
-                .is_some_and(|id| self.channel_ids.contains(id));
+                .is_some_and(|id| self.channel_ids.contains(id))
+                || slack_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()));
             let parent_match = parent_channel
                 .as_ref()
                 .is_some_and(|id| self.channel_ids.contains(id));
@@ -456,6 +474,7 @@ pub fn resolve_agent_for_message(
 #[derive(Debug, Clone, Default)]
 pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
+    pub slack: Option<SlackConfig>,
     pub webhook: Option<WebhookConfig>,
 }
 
@@ -463,6 +482,15 @@ pub struct MessagingConfig {
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
+    pub dm_allowed_users: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SlackConfig {
+    pub enabled: bool,
+    pub bot_token: String,
+    pub app_token: String,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
 }
@@ -477,6 +505,60 @@ pub struct DiscordPermissions {
     pub guild_filter: Option<Vec<u64>>,
     pub channel_filter: std::collections::HashMap<u64, Vec<u64>>,
     pub dm_allowed_users: Vec<u64>,
+}
+
+/// Hot-reloadable Slack permission filters.
+///
+/// Shared with the Slack adapter via `Arc<ArcSwap<..>>` for hot-reloading.
+#[derive(Debug, Clone, Default)]
+pub struct SlackPermissions {
+    pub workspace_filter: Option<Vec<String>>, // team IDs
+    pub channel_filter: std::collections::HashMap<String, Vec<String>>, // team_id -> allowed channel_ids
+    pub dm_allowed_users: Vec<String>,                                  // user IDs
+}
+
+impl SlackPermissions {
+    /// Build from the current config's slack settings and bindings.
+    pub fn from_config(slack: &SlackConfig, bindings: &[Binding]) -> Self {
+        let slack_bindings: Vec<&Binding> =
+            bindings.iter().filter(|b| b.channel == "slack").collect();
+
+        let workspace_filter = {
+            let workspace_ids: Vec<String> = slack_bindings
+                .iter()
+                .filter_map(|b| b.workspace_id.clone())
+                .collect();
+            if workspace_ids.is_empty() {
+                None
+            } else {
+                Some(workspace_ids)
+            }
+        };
+
+        let channel_filter = {
+            let mut filter: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for binding in &slack_bindings {
+                if let Some(workspace_id) = &binding.workspace_id {
+                    if !binding.channel_ids.is_empty() {
+                        filter
+                            .entry(workspace_id.clone())
+                            .or_default()
+                            .extend(binding.channel_ids.clone());
+                    }
+                }
+            }
+            filter
+        };
+
+        let dm_allowed_users = slack.dm_allowed_users.clone();
+
+        Self {
+            workspace_filter,
+            channel_filter,
+            dm_allowed_users,
+        }
+    }
 }
 
 impl DiscordPermissions {
@@ -685,6 +767,7 @@ fn default_enabled() -> bool {
 #[derive(Deserialize, Default)]
 struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
+    slack: Option<TomlSlackConfig>,
     webhook: Option<TomlWebhookConfig>,
 }
 
@@ -693,6 +776,16 @@ struct TomlDiscordConfig {
     #[serde(default)]
     enabled: bool,
     token: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlSlackConfig {
+    #[serde(default)]
+    enabled: bool,
+    bot_token: Option<String>,
+    app_token: Option<String>,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
 }
@@ -719,6 +812,7 @@ struct TomlBinding {
     agent_id: String,
     channel: String,
     guild_id: Option<String>,
+    workspace_id: Option<String>,
     chat_id: Option<String>,
     #[serde(default)]
     channel_ids: Vec<String>,
@@ -1114,6 +1208,24 @@ impl Config {
                     dm_allowed_users: d.dm_allowed_users,
                 })
             }),
+            slack: toml.messaging.slack.and_then(|s| {
+                let bot_token = s
+                    .bot_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())?;
+                let app_token = s
+                    .app_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("SLACK_APP_TOKEN").ok())?;
+                Some(SlackConfig {
+                    enabled: s.enabled,
+                    bot_token,
+                    app_token,
+                    dm_allowed_users: s.dm_allowed_users,
+                })
+            }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
                 enabled: w.enabled,
                 port: w.port,
@@ -1128,6 +1240,7 @@ impl Config {
                 agent_id: b.agent_id,
                 channel: b.channel,
                 guild_id: b.guild_id,
+                workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
                 channel_ids: b.channel_ids,
             })
@@ -1310,6 +1423,7 @@ pub fn spawn_file_watcher(
     instance_dir: PathBuf,
     agents: Vec<(String, PathBuf, Arc<RuntimeConfig>)>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
+    slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
@@ -1416,7 +1530,7 @@ pub fn spawn_file_watcher(
                 None
             };
 
-            // Reload instance-level bindings and Discord permissions
+            // Reload instance-level bindings and permissions
             if let Some(config) = &new_config {
                 bindings.store(Arc::new(config.bindings.clone()));
                 tracing::info!("bindings reloaded ({} entries)", config.bindings.len());
@@ -1427,6 +1541,15 @@ pub fn spawn_file_watcher(
                             DiscordPermissions::from_config(discord_config, &config.bindings);
                         perms.store(Arc::new(new_perms));
                         tracing::info!("discord permissions reloaded");
+                    }
+                }
+
+                if let Some(ref perms) = slack_permissions {
+                    if let Some(slack_config) = &config.messaging.slack {
+                        let new_perms =
+                            SlackPermissions::from_config(slack_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("slack permissions reloaded");
                     }
                 }
             }

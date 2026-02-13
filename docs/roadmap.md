@@ -182,7 +182,6 @@ Chronological development history based on git commits:
 ## ~~Phase 7: Compaction and Persistence~~ Done
 
 - [x] **Compactor** — tiered thresholds (80%/85%/95%), LLM-based summarization, emergency truncation
-- [x] Pre-compaction archiving — write raw transcript to `conversation_archives` table
 - [x] **Conversation persistence** — fire-and-forget SQLite writes via `ConversationLogger`
 - [x] Load conversation history from DB on channel creation (resume across restarts)
 - [x] Compaction summaries persisted and loaded into context

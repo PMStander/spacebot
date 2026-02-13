@@ -39,15 +39,11 @@ These are the normal path. A compaction worker runs in `tokio::spawn` alongside 
 
 1. **Drain** — Write-lock the channel's history, remove the oldest N messages (30% for background, 50% for aggressive). Release the lock. The channel can immediately continue with the remaining history.
 
-2. **Archive** — Serialize the removed messages as JSON and write them to the `conversation_archives` table. This is the raw audit trail — every message that was ever compacted can be recovered.
+2. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/COMPACTOR.md` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
 
-3. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/COMPACTOR.md` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
+3. **Extract memories** — The compaction agent has access to the `memory_save` tool. While summarizing, it identifies facts, preferences, decisions, and observations worth keeping long-term and saves them directly to the memory store. These persist independently of the conversation.
 
-4. **Extract memories** — The compaction agent has access to the `memory_save` tool. While summarizing, it identifies facts, preferences, decisions, and observations worth keeping long-term and saves them directly to the memory store. These persist independently of the conversation.
-
-5. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
-
-6. **Persist** — Save the summary to the `compaction_summaries` table in SQLite.
+4. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
 
 The compaction agent runs with `max_turns(3)` — enough for the LLM to produce the summary and call `memory_save` a few times for extracted memories.
 
@@ -57,9 +53,8 @@ At 95% context usage, there's no time for an LLM call. Emergency truncation is s
 
 1. Write-lock history
 2. Remove oldest 50% of messages
-3. Archive them to `conversation_archives`
-4. Insert a marker: `[System: N older messages were truncated due to context limits]`
-5. Release lock
+3. Insert a marker: `[System: N older messages were truncated due to context limits]`
+4. Release lock
 
 This should rarely fire. If it does, it means the background/aggressive compaction didn't keep up — either the thresholds are too high, or the conversation is extremely fast-paced.
 
@@ -84,14 +79,6 @@ The compaction agent receives a rendered transcript of the removed messages. Use
 **Discard:** Greetings, small talk, tool call details (results matter, not mechanics), intermediate reasoning, repeated information.
 
 **Extract as memories:** Facts, preferences, decisions, observations — anything that should outlive the conversation.
-
-## Storage
-
-Two SQLite tables:
-
-**`compaction_summaries`** — The summaries that get injected into channel context. Each has a `channel_id`, the summary text, how many turns it replaced, and a timestamp. Loaded when resuming a channel across restarts.
-
-**`conversation_archives`** — Raw JSON of every message removed by compaction. Append-only audit trail. Never loaded at runtime — only useful for debugging or if you need to reconstruct what happened.
 
 ## Configuration
 
@@ -123,14 +110,12 @@ The `context_window` setting (default 128,000 tokens) determines the denominator
 | User experience | Typing indicator, 20s freeze | No interruption |
 | Summarization | Same session's LLM | Dedicated compaction worker |
 | Memory extraction | Separate pass | Same LLM call as summarization |
-| Raw transcript | Lost | Archived in `conversation_archives` |
+| Raw transcript | Lost | Extracted as memories |
 | Multiple summaries | One summary replaces all | Summaries stack chronologically |
 | Emergency fallback | None (just hope it fits) | Hard truncation at 95% |
 
 ## Implementation
 
 - `src/agent/compactor.rs` — The `Compactor` struct, threshold checking, token estimation, compaction worker spawning, emergency truncation
-- `src/conversation/history.rs` — `ConversationLogger` methods for summary CRUD and transcript archiving
 - `src/agent/channel.rs` — Channel owns a `Compactor`, calls `check_and_compact()` after each turn
 - `prompts/COMPACTOR.md` — System prompt for the compaction LLM
-- `migrations/20260211000004_compaction.sql` — Schema for `compaction_summaries` and `conversation_archives`

@@ -6,7 +6,7 @@ How Spacebot gives LLM processes the ability to act.
 
 Every tool implements Rig's `Tool` trait and lives in `src/tools/`. Tools are organized by function, not by consumer. Which process gets which tools is configured via ToolServer factory functions in `src/tools.rs`.
 
-All 15 tools:
+All 16 tools:
 
 | Tool | Purpose | Consumers |
 |------|---------|-----------|
@@ -19,6 +19,7 @@ All 15 tools:
 | `react` | Add an emoji reaction to the user's message | Channel |
 | `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
 | `memory_recall` | Search memories via hybrid search | Branch |
+| `channel_recall` | Retrieve transcript from another channel | Branch |
 | `set_status` | Report worker progress to the channel | Worker |
 | `shell` | Execute shell commands | Worker |
 | `file` | Read, write, and list files | Worker |
@@ -59,15 +60,16 @@ The channel has no memory tools. It delegates memory work to branches. Channel-s
 Each branch gets its own isolated ToolServer, created at spawn time via `create_branch_tool_server()`.
 
 ```
-┌──────────────────────────────────────────┐
-│        Branch ToolServer (per-branch)     │
-├──────────────────────────────────────────┤
-│   memory_save    (Arc<MemorySearch>)     │
-│   memory_recall  (Arc<MemorySearch>)     │
-└──────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│        Branch ToolServer (per-branch)         │
+├──────────────────────────────────────────────┤
+│   memory_save      (Arc<MemorySearch>)       │
+│   memory_recall    (Arc<MemorySearch>)       │
+│   channel_recall   (ConversationLogger)      │
+└──────────────────────────────────────────────┘
 ```
 
-Branch isolation ensures `memory_recall` is never visible to the channel. Both tools are registered at creation and live for the lifetime of the branch.
+Branch isolation ensures `memory_recall` and `channel_recall` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
 
 ### Worker ToolServer (per-worker)
 
@@ -115,8 +117,8 @@ create_channel_tool_server() -> ToolServerHandle
 add_channel_tools(handle, channel_id, response_tx, conversation_id, event_tx)
 remove_channel_tools(handle)
 
-// Per branch spawn — creates an isolated ToolServer with memory tools
-create_branch_tool_server(memory_search) -> ToolServerHandle
+// Per branch spawn — creates an isolated ToolServer with memory + channel recall tools
+create_branch_tool_server(memory_search, conversation_logger) -> ToolServerHandle
 
 // Per worker spawn — creates an isolated ToolServer (browser conditionally included)
 create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
@@ -129,7 +131,7 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `channel_recall` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -146,7 +148,7 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 
 ### Per-process tools (created and destroyed with the process)
 
-Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall`. Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall`. Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`.
 
 ## Tool Design Patterns
 
@@ -205,6 +207,17 @@ Writes a structured memory to SQLite + generates an embedding in LanceDB. Suppor
 ### memory_recall
 
 Hybrid search across the memory store. Combines vector similarity (semantic), full-text search (keyword), and graph traversal (connected memories) via Reciprocal Rank Fusion. Records access on found memories (affects importance decay).
+
+### channel_recall
+
+Retrieves conversation transcript from another channel. Operates in two modes:
+
+- **List mode** (no `channel` arg) — returns all known channels with their Discord names, message counts, and last activity timestamps. Lets the branch discover what channels exist.
+- **Transcript mode** (`channel` arg provided) — resolves the channel by name (fuzzy matching: exact → prefix → contains → raw ID), then returns up to 100 recent messages with sender, role, content, and timestamps.
+
+If the name doesn't match any channel, falls back to list mode so the LLM can self-correct with the available options.
+
+Channel names are resolved from the `discord_channel_name` field stored in message metadata. The tool queries `conversation_messages` in SQLite directly — it reads persisted messages, not in-memory Rig history.
 
 ### set_status
 

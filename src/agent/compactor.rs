@@ -4,7 +4,6 @@
 //! spawns compaction workers when thresholds are crossed. The LLM work (summarization
 //! + memory extraction) happens in the spawned worker, not here.
 
-use crate::conversation::ConversationLogger;
 use crate::error::Result;
 use crate::llm::SpacebotModel;
 use crate::{AgentDeps, ChannelId, ProcessType};
@@ -20,7 +19,6 @@ pub struct Compactor {
     pub channel_id: ChannelId,
     pub deps: AgentDeps,
     pub history: Arc<RwLock<Vec<Message>>>,
-    pub logger: ConversationLogger,
     /// Is a compaction currently running.
     is_compacting: Arc<RwLock<bool>>,
 }
@@ -31,13 +29,11 @@ impl Compactor {
         channel_id: ChannelId,
         deps: AgentDeps,
         history: Arc<RwLock<Vec<Message>>>,
-        logger: ConversationLogger,
     ) -> Self {
         Self {
             channel_id,
             deps,
             history,
-            logger,
             is_compacting: Arc::new(RwLock::new(false)),
         }
     }
@@ -98,8 +94,8 @@ impl Compactor {
 
     /// Spawn a compaction worker in the background.
     ///
-    /// The worker reads old messages, archives them, runs an LLM to produce a
-    /// summary + extract memories, then swaps the summary into the channel's history.
+    /// The worker reads old messages, runs an LLM to produce a summary + extract
+    /// memories, then swaps the summary into the channel's history.
     async fn spawn_compaction_worker(&self, action: CompactionAction) {
         let mut is_compacting = self.is_compacting.write().await;
         *is_compacting = true;
@@ -115,7 +111,6 @@ impl Compactor {
         let is_compacting = self.is_compacting.clone();
         let channel_id = self.channel_id.clone();
         let deps = self.deps.clone();
-        let logger = self.logger.clone();
         let prompt_engine = deps.runtime_config.prompts.load();
         let compactor_prompt = prompt_engine
             .render_static("compactor")
@@ -123,9 +118,7 @@ impl Compactor {
 
         tokio::spawn(async move {
             let result = run_compaction(
-                &channel_id,
                 &deps,
-                &logger,
                 &compactor_prompt,
                 &history,
                 fraction,
@@ -166,11 +159,8 @@ impl Compactor {
 
         let remove_count = total / 2;
 
-        // Archive the removed messages before dropping them
         let removed: Vec<Message> = history.drain(..remove_count).collect();
-        if let Ok(json) = serde_json::to_string(&removed) {
-            self.logger.archive_transcript(&self.channel_id, &json);
-        }
+        drop(removed);
 
         // Insert a marker at the beginning
         let prompt_engine = self.deps.runtime_config.prompts.load();
@@ -190,11 +180,9 @@ impl Compactor {
     }
 }
 
-/// Run the actual compaction: archive, summarize via LLM, extract memories, swap.
+/// Run the actual compaction: summarize via LLM, extract memories, swap summary into history.
 async fn run_compaction(
-    channel_id: &ChannelId,
     deps: &AgentDeps,
-    logger: &ConversationLogger,
     compactor_prompt: &str,
     history: &Arc<RwLock<Vec<Message>>>,
     fraction: f32,
@@ -211,15 +199,10 @@ async fn run_compaction(
         (removed, remove_count)
     };
 
-    // 2. Archive raw transcript
-    if let Ok(json) = serde_json::to_string(&removed_messages) {
-        logger.archive_transcript(channel_id, &json);
-    }
-
-    // 3. Build the transcript text for the LLM
+    // 2. Build the transcript text for the LLM
     let transcript = render_messages_as_transcript(&removed_messages);
 
-    // 4. Run the compaction LLM to produce summary + extracted memories
+    // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Worker, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
@@ -249,15 +232,12 @@ async fn run_compaction(
         }
     };
 
-    // 5. Insert the summary at the beginning of the channel's history
+    // 4. Insert the summary at the beginning of the channel's history
     {
         let mut hist = history.write().await;
         let summary_message = format!("[Compaction Summary]: {summary}");
         hist.insert(0, Message::from(summary_message));
     }
-
-    // 6. Persist the summary to SQLite
-    logger.save_compaction_summary(channel_id, &summary, remove_count);
 
     Ok(remove_count)
 }

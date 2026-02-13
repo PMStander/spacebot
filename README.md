@@ -31,7 +31,7 @@
   <a href="docs/">Docs</a>
 </p>
 
-> **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord or Telegram, configure your agent, and go. No self-hosting required.
+> **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord, Slack, or Telegram, configure your agent, and go. No self-hosting required.
 
 ---
 
@@ -51,7 +51,7 @@ Five process types. Each does one job.
 
 ### Channels
 
-The user-facing LLM process — the ambassador to the human. One per conversation (Telegram DM, Discord thread, etc). Has soul, identity, and personality. Talks to the user. Delegates everything else.
+The user-facing LLM process — the ambassador to the human. One per conversation (Discord thread, Slack channel, Telegram DM, etc). Has soul, identity, and personality. Talks to the user. Delegates everything else.
 
 A channel does **not**: execute tasks directly, search memories itself, or do any heavy tool work. It is always responsive — never blocked by work, never frozen by compaction.
 
@@ -79,7 +79,7 @@ Multiple branches run concurrently. First done, first incorporated. Each branch 
 
 Independent processes that do jobs. Get a specific task, a focused system prompt, and task-appropriate tools. No channel context, no soul, no personality.
 
-**Fire-and-forget** — do a job and return a result. Memory recall, summarization, one-shot tasks.
+**Fire-and-forget** — do a job and return a result. Summarization, file operations, one-shot tasks.
 
 **Interactive** — long-running, accept follow-up input from the channel. Coding sessions, multi-step tasks.
 
@@ -227,6 +227,7 @@ The binary creates all databases and directories automatically on first run. See
 | Embeddings | **FastEmbed** — local embedding generation |
 | Crypto | **AES-256-GCM** — secret encryption at rest |
 | Discord | **Serenity** — gateway, cache, events |
+| Slack | **slack-morphism** — Socket Mode, events, streaming via message edits |
 | Browser | **Chromiumoxide** — headless Chrome via CDP |
 | CLI | **Clap** — command line interface |
 
@@ -248,7 +249,7 @@ spacebot/
 │   ├── tools/               # All LLM tools (reply, branch, memory, shell, etc.)
 │   ├── memory/              # Store, types, search, LanceDB, embeddings, maintenance
 │   ├── llm/                 # Model routing, provider clients, SpacebotModel
-│   ├── messaging/           # Discord, Telegram, webhook adapters
+│   ├── messaging/           # Discord, Slack, Telegram, webhook adapters
 │   ├── conversation/        # History persistence, context assembly
 │   ├── heartbeat/           # Scheduler, store
 │   ├── identity/            # SOUL.md, IDENTITY.md, USER.md loading
@@ -277,7 +278,7 @@ spacebot/
 | [Cortex](docs/cortex.md) | Memory bulletin and system observation |
 | [Heartbeats](docs/heartbeats.md) | Scheduled recurring tasks |
 | [Routing](docs/routing.md) | Model routing and fallback chains |
-| [Messaging](docs/messaging.md) | Adapter architecture (Discord, Telegram, webhook) |
+| [Messaging](docs/messaging.md) | Adapter architecture (Discord, Slack, Telegram, webhook) |
 | [Discord Setup](docs/discord-setup.md) | Discord bot setup guide |
 | [Browser](docs/browser.md) | Headless Chrome for workers |
 | [OpenCode](docs/opencode.md) | OpenCode as a worker backend |

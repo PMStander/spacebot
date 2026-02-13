@@ -198,6 +198,23 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Shared Slack permissions (hot-reloadable via file watcher)
+    let slack_permissions = config.messaging.slack.as_ref().map(|slack_config| {
+        let perms = spacebot::config::SlackPermissions::from_config(slack_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(slack_config) = &config.messaging.slack {
+        if slack_config.enabled {
+            let adapter = spacebot::messaging::slack::SlackAdapter::new(
+                &slack_config.bot_token,
+                &slack_config.app_token,
+                slack_permissions.clone().expect("slack permissions initialized when slack is enabled"),
+            );
+            messaging_manager.register(adapter);
+        }
+    }
+
     let messaging_manager = Arc::new(messaging_manager);
 
     // Start all messaging adapters and get the merged inbound stream
@@ -294,13 +311,14 @@ async fn main() -> anyhow::Result<()> {
     let bindings: Arc<ArcSwap<Vec<spacebot::config::Binding>>> =
         Arc::new(ArcSwap::from_pointee(config.bindings.clone()));
 
-    // Start file watcher for hot-reloading config, prompts, identity, skills, bindings, and discord permissions
+    // Start file watcher for hot-reloading config, prompts, identity, skills, bindings, and permissions
     let config_path = config.instance_dir.join("config.toml");
     let _file_watcher = spacebot::config::spawn_file_watcher(
         config_path,
         config.instance_dir.clone(),
         watcher_agents,
         discord_permissions,
+        slack_permissions,
         bindings.clone(),
     );
 

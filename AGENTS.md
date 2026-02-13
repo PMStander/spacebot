@@ -34,7 +34,7 @@ Creating a branch is `let branch_history = channel_history.clone()`.
 
 The branch result is injected into the channel's history as a distinct message type. Then the branch is deleted. Multiple branches can run concurrently per channel (configurable limit). First done, first incorporated.
 
-**Tools:** memory_recall, memory_save, spawn_worker  
+**Tools:** memory_recall, memory_save, channel_recall, spawn_worker  
 **Context:** Clone of channel history at fork time  
 **Lifecycle:** Short-lived. Returns a conclusion, then deleted.
 
@@ -140,6 +140,7 @@ src/
 │   ├── react.rs        — add emoji reaction (channel only)
 │   ├── memory_save.rs  — write memory to store (branch + cortex + compactor)
 │   ├── memory_recall.rs— search + curate memories (branch only)
+│   ├── channel_recall.rs— retrieve transcript from other channels (branch only)
 │   ├── set_status.rs   — update worker status (workers only)
 │   ├── shell.rs        — execute shell commands (task workers)
 │   ├── file.rs         — read/write/list files (task workers)
@@ -357,8 +358,6 @@ These are validated patterns from research (see `docs/research/pattern-analysis.
 **Error-as-result for tools:** Tool errors are returned as structured results, not panics. The LLM sees the error and can recover.
 
 **Worker state machine:** Validate transitions with `can_transition_to()` using `matches!`. Illegal transitions are runtime errors, not silent bugs.
-
-**Pre-compaction archiving:** Write raw transcript to `conversation_archives` table before compaction summarizes it. Cheap audit trail.
 
 ## Reference Docs
 

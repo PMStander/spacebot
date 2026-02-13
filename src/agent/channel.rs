@@ -105,7 +105,6 @@ impl Channel {
             id.clone(),
             deps.clone(),
             history.clone(),
-            conversation_logger.clone(),
         );
 
         let state = ChannelState {
