@@ -39,13 +39,13 @@ These are the normal path. A compaction worker runs in `tokio::spawn` alongside 
 
 1. **Drain** — Write-lock the channel's history, remove the oldest N messages (30% for background, 50% for aggressive). Release the lock. The channel can immediately continue with the remaining history.
 
-2. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/COMPACTOR.md` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
+2. **Summarize** — Build a transcript from the removed messages and run a Rig agent with `prompts/en/compactor.md.j2` as the system prompt. The agent produces a condensed summary preserving key decisions, active topics, commitments, and emotional context. It discards greetings, tool call mechanics, and intermediate reasoning.
 
 3. **Extract memories** — The compaction agent has access to the `memory_save` tool. While summarizing, it identifies facts, preferences, decisions, and observations worth keeping long-term and saves them directly to the memory store. These persist independently of the conversation.
 
 4. **Inject summary** — Write-lock the history again, insert the summary at position 0 as `[Compaction Summary]: ...`. Release the lock. The channel sees this summary on its next turn.
 
-The compaction agent runs with `max_turns(3)` — enough for the LLM to produce the summary and call `memory_save` a few times for extracted memories.
+The compaction agent runs with `max_turns(10)` — enough for the LLM to produce the summary and call `memory_save` a few times for extracted memories.
 
 ## Emergency Truncation
 
@@ -72,7 +72,7 @@ This gives the channel rolling awareness of what happened without carrying the f
 
 ## What the Compaction LLM Sees
 
-The compaction agent receives a rendered transcript of the removed messages. User messages, assistant responses, tool calls, and tool results — all formatted as readable text. The agent's system prompt (`prompts/COMPACTOR.md`) tells it to:
+The compaction agent receives a rendered transcript of the removed messages. User messages, assistant responses, tool calls, and tool results — all formatted as readable text. The agent's system prompt (`prompts/en/compactor.md.j2`) tells it to:
 
 **Preserve:** Key decisions, active topics, commitments, emotional context, active workers/tasks.
 
@@ -118,4 +118,4 @@ The `context_window` setting (default 128,000 tokens) determines the denominator
 
 - `src/agent/compactor.rs` — The `Compactor` struct, threshold checking, token estimation, compaction worker spawning, emergency truncation
 - `src/agent/channel.rs` — Channel owns a `Compactor`, calls `check_and_compact()` after each turn
-- `prompts/COMPACTOR.md` — System prompt for the compaction LLM
+- `prompts/en/compactor.md.j2` — System prompt for the compaction LLM

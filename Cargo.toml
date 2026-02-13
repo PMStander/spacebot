@@ -83,6 +83,12 @@ slack-morphism = { version = "2.17", features = ["hyper"] }
 # Stream utilities
 tokio-stream = "0.1"
 
+# HTTP server for control UI
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
 # Indoc for test fixtures
 indoc = "2"
 arrow-array = "57.3.0"

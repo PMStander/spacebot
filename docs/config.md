@@ -27,6 +27,7 @@ max_concurrent_branches = 5    # max branches per channel
 max_turns = 5                  # max LLM turns per channel message
 context_window = 128000        # context window size in tokens
 history_backfill_count = 50    # messages to fetch from platform on new channel
+worker_log_mode = "errors_only" # "errors_only", "all_separate", or "all_combined"
 
 # Model routing per process type.
 [defaults.routing]
@@ -162,7 +163,7 @@ You can mix providers across process types. See [docs/routing.md](routing.md) fo
 
 ## Hot Reload
 
-Most config values are hot-reloaded when their files change. Spacebot watches `config.toml`, prompt files, identity files, and skill directories. Changes are debounced to 2 seconds and applied to all running channels, workers, and branches without restart.
+Most config values are hot-reloaded when their files change. Spacebot watches `config.toml`, identity files, and skill directories. Changes are debounced to 2 seconds and applied to all running channels, workers, and branches without restart.
 
 ### What Hot-Reloads
 
@@ -174,9 +175,10 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
-| System prompts (CHANNEL.md, etc.) | Yes | Next channel message / worker spawn uses new prompt |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
+| Bindings | Yes | Next message routes using new bindings |
+| Discord/Slack permissions | Yes | Next message checks new permission rules |
 
 ### What Needs Restart
 
@@ -186,17 +188,15 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | Messaging adapters (Discord token, webhook bind/port) | Adapter connections are long-lived |
 | Agent topology (adding/removing `[[agents]]`) | Databases and event buses are per-agent |
 | Database paths | Connections are opened once at startup |
-| Bindings | Routing table is copied at startup |
+| System prompts | Compiled into the binary via `include_str!` |
 
 ### How It Works
 
 A file watcher (via the `notify` crate) monitors:
 
 - `~/.spacebot/config.toml`
-- `~/.spacebot/prompts/` (shared prompt directory)
 - `~/.spacebot/skills/` (instance-level skills)
-- Each agent's `workspace/` (identity files)
-- Each agent's `workspace/prompts/` (prompt overrides)
+- Each agent's `workspace/` (identity files: SOUL.md, IDENTITY.md, USER.md)
 - Each agent's `workspace/skills/` (workspace-level skills)
 
 On file change, Spacebot re-reads the changed files and atomically swaps the new values into the live `RuntimeConfig` using `arc-swap`. All consumers (channels, branches, workers, compactors, cron jobs) read from `RuntimeConfig` on every use, so they pick up changes immediately.
@@ -204,7 +204,7 @@ On file change, Spacebot re-reads the changed files and atomically swaps the new
 ```
 File change detected
   → debounce 2 seconds (collapses rapid edits)
-  → categorize: config / prompts / identity / skills
+  → categorize: config / identity / skills
   → re-parse changed files
   → ArcSwap::store() on RuntimeConfig fields
   → all running processes see new values on next read
@@ -212,18 +212,16 @@ File change detected
 
 No lock contention. Reads are wait-free via `arc-swap`. The watcher runs on a dedicated thread; reloads don't block the async runtime.
 
+### System Prompts
+
+System prompts (channel, branch, worker, compactor, cortex, etc.) are Jinja2 templates embedded in the binary at compile time via `include_str!`. They live in the source tree at `prompts/en/*.md.j2` and are not user-editable at runtime. Changing prompts requires rebuilding the binary.
+
 ## On-Disk Layout
 
 ```
 ~/.spacebot/
 ├── config.toml                    # main config (hot-reloaded)
 ├── embedding_cache/               # shared embedding model cache
-├── prompts/                       # shared system prompts (hot-reloaded)
-│   ├── CHANNEL.md
-│   ├── BRANCH.md
-│   ├── WORKER.md
-│   ├── COMPACTOR.md
-│   └── CORTEX.md
 ├── skills/                        # instance-level skills (hot-reloaded)
 │   └── weather/
 │       └── SKILL.md
@@ -233,13 +231,14 @@ No lock contention. Reads are wait-free via `arc-swap`. The watcher runs on a de
         │   ├── SOUL.md            # personality (hot-reloaded)
         │   ├── IDENTITY.md        # name and nature (hot-reloaded)
         │   ├── USER.md            # info about the human (hot-reloaded)
-        │   ├── prompts/           # prompt overrides (hot-reloaded)
-        │   │   └── CHANNEL.md
-        │   └── skills/            # workspace-level skills (hot-reloaded)
+        │   ├── skills/            # workspace-level skills (hot-reloaded)
+        │   └── ingest/            # drop files here for memory ingestion
         ├── data/
         │   ├── spacebot.db        # SQLite
         │   ├── lancedb/           # vector search
-        │   └── config.redb        # key-value settings
+        │   ├── config.redb        # key-value settings
+        │   ├── settings.redb      # runtime settings (worker_log_mode, etc.)
+        │   └── logs/              # worker execution logs
         └── archives/              # compaction transcripts
 ```
 
@@ -263,6 +262,7 @@ At least one key must be provided (via config or environment).
 | `max_turns` | integer | 5 | Max LLM turns per channel message |
 | `context_window` | integer | 128000 | Context window size in tokens |
 | `history_backfill_count` | integer | 50 | Messages to fetch from platform on new channel |
+| `worker_log_mode` | string | `"errors_only"` | Worker log persistence: `"errors_only"`, `"all_separate"`, or `"all_combined"` |
 
 ### `[defaults.routing]`
 

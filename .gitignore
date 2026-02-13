@@ -1,3 +1,8 @@
 /target
 .DS_Store
 .fastembed_cache
+
+# Interface
+interface/node_modules/
+interface/dist/
+interface/bun.lock

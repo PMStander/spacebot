@@ -1,6 +1,6 @@
-# Agent Permissions and Security
+# Agent Permissions and Security — Plan
 
-Per-agent permission system that controls what tools can do, enforces inter-agent boundaries, and prevents data leakage.
+Per-agent permission system that controls what tools can do, enforces inter-agent boundaries, and prevents data leakage. Not yet implemented.
 
 ---
 

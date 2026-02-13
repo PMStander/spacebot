@@ -242,6 +242,21 @@ async fn run(config: spacebot::config::Config, foreground: bool) -> anyhow::Resu
         .await
         .context("failed to start IPC server")?;
 
+    // Start HTTP API server if enabled
+    let _http_handle = if config.api.enabled {
+        let bind: std::net::SocketAddr = format!("{}:{}", config.api.bind, config.api.port)
+            .parse()
+            .context("invalid API bind address")?;
+        let http_shutdown = shutdown_rx.clone();
+        Some(
+            spacebot::api::start_http_server(bind, http_shutdown)
+                .await
+                .context("failed to start HTTP server")?,
+        )
+    } else {
+        None
+    };
+
     // Shared LLM manager (same API keys for all agents)
     let llm_manager = Arc::new(
         spacebot::llm::LlmManager::new(config.llm.clone())
@@ -339,8 +354,11 @@ async fn run(config: spacebot::config::Config, foreground: bool) -> anyhow::Resu
             skills,
         ));
 
-        // Set the settings store in RuntimeConfig
-        runtime_config.set_settings(settings_store);
+        // Set the settings store in RuntimeConfig and apply config-driven defaults
+        runtime_config.set_settings(settings_store.clone());
+        if let Err(error) = settings_store.set_worker_log_mode(config.defaults.worker_log_mode) {
+            tracing::warn!(%error, agent = %agent_config.id, "failed to set worker_log_mode from config");
+        }
 
         watcher_agents.push((
             agent_config.id.clone(),

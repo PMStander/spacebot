@@ -24,6 +24,29 @@ pub struct Config {
     pub messaging: MessagingConfig,
     /// Routing bindings (maps platform conversations to agents).
     pub bindings: Vec<Binding>,
+    /// HTTP API server configuration.
+    pub api: ApiConfig,
+}
+
+/// HTTP API server configuration.
+#[derive(Debug, Clone)]
+pub struct ApiConfig {
+    /// Whether the HTTP API server is enabled.
+    pub enabled: bool,
+    /// Port to bind the HTTP server on.
+    pub port: u16,
+    /// Address to bind the HTTP server on.
+    pub bind: String,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 19898,
+            bind: "127.0.0.1".into(),
+        }
+    }
 }
 
 /// LLM provider credentials (instance-level).
@@ -52,6 +75,8 @@ pub struct DefaultsConfig {
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
+    /// Worker log mode: "errors_only", "all_separate", or "all_combined".
+    pub worker_log_mode: crate::settings::WorkerLogMode,
 }
 
 /// Compaction threshold configuration.
@@ -284,6 +309,7 @@ impl Default for DefaultsConfig {
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
+            worker_log_mode: crate::settings::WorkerLogMode::default(),
         }
     }
 }
@@ -636,6 +662,38 @@ struct TomlConfig {
     messaging: TomlMessagingConfig,
     #[serde(default)]
     bindings: Vec<TomlBinding>,
+    #[serde(default)]
+    api: TomlApiConfig,
+}
+
+#[derive(Deserialize)]
+struct TomlApiConfig {
+    #[serde(default = "default_api_enabled")]
+    enabled: bool,
+    #[serde(default = "default_api_port")]
+    port: u16,
+    #[serde(default = "default_api_bind")]
+    bind: String,
+}
+
+impl Default for TomlApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_api_enabled(),
+            port: default_api_port(),
+            bind: default_api_bind(),
+        }
+    }
+}
+
+fn default_api_enabled() -> bool {
+    true
+}
+fn default_api_port() -> u16 {
+    19898
+}
+fn default_api_bind() -> String {
+    "127.0.0.1".into()
 }
 
 #[derive(Deserialize, Default)]
@@ -659,6 +717,7 @@ struct TomlDefaultsConfig {
     browser: Option<TomlBrowserConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
+    worker_log_mode: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -953,6 +1012,7 @@ impl Config {
             agents,
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
+            api: ApiConfig::default(),
         })
     }
 
@@ -1122,6 +1182,12 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.opencode.clone()),
+            worker_log_mode: toml
+                .defaults
+                .worker_log_mode
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(base_defaults.worker_log_mode),
         };
 
         let mut agents: Vec<AgentConfig> = toml
@@ -1246,6 +1312,12 @@ impl Config {
             })
             .collect();
 
+        let api = ApiConfig {
+            enabled: toml.api.enabled,
+            port: toml.api.port,
+            bind: toml.api.bind,
+        };
+
         Ok(Config {
             instance_dir,
             llm,
@@ -1253,6 +1325,7 @@ impl Config {
             agents,
             messaging,
             bindings,
+            api,
         })
     }
 
