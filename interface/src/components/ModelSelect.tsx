@@ -3,9 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api, type ModelInfo } from "@/api/client";
 import { Input } from "@/ui";
 
-interface ModelSelectProps {
-	label: string;
-	description: string;
+export interface ModelSelectProps {
+	label?: string;
+	description?: string;
 	value: string;
 	onChange: (value: string) => void;
 }
@@ -117,9 +117,9 @@ export function ModelSelect({ label, description, value, onChange }: ModelSelect
 
 	return (
 		<div className="flex flex-col gap-1.5" ref={containerRef}>
-			<label className="text-sm font-medium text-ink">{label}</label>
-			<p className="text-tiny text-ink-faint">{description}</p>
-			<div className="relative mt-1">
+			{label && <label className="text-sm font-medium text-ink">{label}</label>}
+			{description && <p className="text-tiny text-ink-faint">{description}</p>}
+			<div className={`relative ${label || description ? "mt-1" : ""}`}>
 				<Input
 					ref={inputRef}
 					type="text"

@@ -481,6 +481,8 @@ export interface RoutingSection {
 	compactor: string;
 	cortex: string;
 	rate_limit_cooldown_secs: number;
+	task_overrides: Record<string, string>;
+	fallbacks: Record<string, string[]>;
 }
 
 export interface TuningSection {
@@ -551,6 +553,8 @@ export interface RoutingUpdate {
 	compactor?: string;
 	cortex?: string;
 	rate_limit_cooldown_secs?: number;
+	task_overrides?: Record<string, string>;
+	fallbacks?: Record<string, string[]>;
 }
 
 export interface TuningUpdate {
@@ -611,6 +615,41 @@ export interface AgentConfigUpdateRequest {
 	memory_persistence?: MemoryPersistenceUpdate;
 	browser?: BrowserUpdate;
 	discord?: DiscordUpdate;
+}
+
+// -- Skills Types --
+
+export interface SkillInfo {
+	name: string;
+	description: string;
+	source: "instance" | "workspace";
+	file_path: string;
+}
+
+export interface AgentSkillsResponse {
+	skills: SkillInfo[];
+}
+
+export interface InstanceSkillsResponse {
+	skills: SkillInfo[];
+	skills_dir: string;
+}
+
+export interface InstanceSkillActionResponse {
+	success: boolean;
+	message: string;
+}
+
+export interface CreateSkillRequest {
+	name: string;
+	description: string;
+	content: string;
+}
+
+export interface UpdateSkillRequest {
+	name: string;
+	description?: string;
+	content?: string;
 }
 
 // -- Cron Types --
@@ -974,6 +1013,8 @@ export const api = {
 	},
 	agentConfig: (agentId: string) =>
 		fetchJson<AgentConfigResponse>(`/agents/config?agent_id=${encodeURIComponent(agentId)}`),
+	agentSkills: (agentId: string) =>
+		fetchJson<AgentSkillsResponse>(`/agents/skills?agent_id=${encodeURIComponent(agentId)}`),
 	updateAgentConfig: async (request: AgentConfigUpdateRequest) => {
 		const response = await fetch(`${API_BASE}/agents/config`, {
 			method: "PUT",
@@ -1189,6 +1230,41 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<GlobalSettingsUpdateResponse>;
+	},
+
+	// Instance Skills API
+	instanceSkills: () => fetchJson<InstanceSkillsResponse>("/settings/skills"),
+	createInstanceSkill: async (request: CreateSkillRequest) => {
+		const response = await fetch(`${API_BASE}/settings/skills`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<InstanceSkillActionResponse>;
+	},
+	updateInstanceSkill: async (request: UpdateSkillRequest) => {
+		const response = await fetch(`${API_BASE}/settings/skills`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<InstanceSkillActionResponse>;
+	},
+	deleteInstanceSkill: async (name: string) => {
+		const params = new URLSearchParams({ name });
+		const response = await fetch(`${API_BASE}/settings/skills?${params}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<InstanceSkillActionResponse>;
 	},
 
 	// Raw config API

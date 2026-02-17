@@ -8,7 +8,7 @@ import {ProviderIcon} from "@/lib/providerIcons";
 import {TagInput} from "@/components/TagInput";
 import {parse as parseToml} from "smol-toml";
 
-type SectionId = "providers" | "channels" | "bindings" | "api-keys" | "server" | "opencode" | "cli-workers" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "bindings" | "api-keys" | "server" | "opencode" | "cli-workers" | "skills" | "worker-logs" | "config-file";
 
 const SECTIONS = [
 	{
@@ -52,6 +52,12 @@ const SECTIONS = [
 		label: "CLI Workers",
 		group: "system" as const,
 		description: "External CLI agent backends",
+	},
+	{
+		id: "skills" as const,
+		label: "Skills",
+		group: "system" as const,
+		description: "Instance-level skill definitions",
 	},
 	{
 		id: "worker-logs" as const,
@@ -365,6 +371,8 @@ export function Settings() {
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "cli-workers" ? (
 						<CliWorkersSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "skills" ? (
+						<InstanceSkillsSection />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "config-file" ? (
@@ -2094,6 +2102,227 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 					{message.text}
 				</div>
 			)}
+		</div>
+	);
+}
+
+function InstanceSkillsSection() {
+	const queryClient = useQueryClient();
+	const [creating, setCreating] = useState(false);
+	const [skillForm, setSkillForm] = useState({ name: "", description: "", content: "" });
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+
+	const { data, isLoading } = useQuery({
+		queryKey: ["instance-skills"],
+		queryFn: api.instanceSkills,
+		staleTime: 5_000,
+	});
+
+	const createMutation = useMutation({
+		mutationFn: api.createInstanceSkill,
+		onSuccess: (result) => {
+			if (result.success) {
+				setCreating(false);
+				setSkillForm({ name: "", description: "", content: "" });
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["instance-skills"] });
+			} else {
+				setMessage({ text: result.message, type: "error" });
+			}
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const deleteMutation = useMutation({
+		mutationFn: api.deleteInstanceSkill,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["instance-skills"] });
+			} else {
+				setMessage({ text: result.message, type: "error" });
+			}
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const handleCreate = () => {
+		if (!skillForm.name.trim()) return;
+		createMutation.mutate(skillForm);
+	};
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Instance Skills</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Manage instance-level skills shared across all agents. Each skill is a directory with a SKILL.md file.
+				</p>
+				{data?.skills_dir && (
+					<p className="mt-1 font-mono text-tiny text-ink-faint">
+						{data.skills_dir}
+					</p>
+				)}
+			</div>
+
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading skills...
+				</div>
+			) : (
+				<>
+					<div className="mb-4 flex items-center justify-between">
+						<h3 className="font-plex text-sm font-medium text-ink">
+							{data?.skills.length ?? 0} skill{(data?.skills.length ?? 0) !== 1 ? "s" : ""} loaded
+						</h3>
+						<Button
+							size="sm"
+							variant="outline"
+							onClick={() => {
+								setCreating(true);
+								setSkillForm({ name: "", description: "", content: "" });
+								setMessage(null);
+							}}
+						>
+							Create Skill
+						</Button>
+					</div>
+
+					{data?.skills && data.skills.length > 0 ? (
+						<div className="flex flex-col gap-3">
+							{data.skills.map((skill) => (
+								<div
+									key={skill.name}
+									className="rounded-lg border border-app-line bg-app-box p-4"
+								>
+									<div className="flex items-center gap-3">
+										<div className="flex-1">
+											<div className="flex items-center gap-2">
+												<span className="text-sm font-medium text-ink">{skill.name}</span>
+												<span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-tiny font-medium text-purple-400">
+													instance
+												</span>
+											</div>
+											{skill.description && (
+												<p className="mt-0.5 text-sm text-ink-dull">{skill.description}</p>
+											)}
+											<p className="mt-1 font-mono text-tiny text-ink-faint/50">{skill.file_path}</p>
+										</div>
+										<div className="flex gap-2">
+											<Button
+												size="sm"
+												variant="ghost"
+												onClick={() => deleteMutation.mutate(skill.name)}
+												loading={deleteMutation.isPending}
+												className="text-red-400 hover:text-red-300"
+											>
+												Delete
+											</Button>
+										</div>
+									</div>
+								</div>
+							))}
+						</div>
+					) : (
+						<div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-app-line/50 bg-app-darkBox/20 py-12">
+							<p className="text-sm text-ink-faint">No instance skills found</p>
+							<p className="mt-1 text-tiny text-ink-faint/70">
+								Create a skill or add skill directories to your instance skills/ folder
+							</p>
+						</div>
+					)}
+
+					{message && (
+						<div
+							className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+								message.type === "success"
+									? "border-green-500/20 bg-green-500/10 text-green-400"
+									: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					)}
+				</>
+			)}
+
+			<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+				<p className="text-sm text-ink-faint">
+					Skills are directories containing a{" "}
+					<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">SKILL.md</code>{" "}
+					file with YAML frontmatter (name, description) and markdown instructions. Agent workspace skills
+					override instance skills with the same name.
+				</p>
+			</div>
+
+			{/* Create Skill Dialog */}
+			<Dialog open={creating} onOpenChange={(open) => { if (!open) setCreating(false); }}>
+				<DialogContent className="max-w-lg">
+					<DialogHeader>
+						<DialogTitle>Create Skill</DialogTitle>
+						<DialogDescription>
+							Create a new instance-level skill. This will create a directory with a SKILL.md file.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="flex flex-col gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink">Name</label>
+							<Input
+								type="text"
+								value={skillForm.name}
+								onChange={(e) => setSkillForm({ ...skillForm, name: e.target.value })}
+								placeholder="weather"
+								autoFocus
+							/>
+							<p className="mt-1 text-tiny text-ink-faint">
+								Used as the directory name (lowercase, hyphens allowed)
+							</p>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink">Description</label>
+							<Input
+								type="text"
+								value={skillForm.description}
+								onChange={(e) => setSkillForm({ ...skillForm, description: e.target.value })}
+								placeholder="Get current weather and forecasts"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink">Instructions</label>
+							<textarea
+								value={skillForm.content}
+								onChange={(e) => setSkillForm({ ...skillForm, content: e.target.value })}
+								placeholder="# Weather&#10;&#10;Use curl to fetch weather data from..."
+								rows={10}
+								className="w-full rounded-md border border-app-line bg-app-darkBox/30 px-3 py-2 font-mono text-sm text-ink placeholder:text-ink-faint/40 focus:border-accent focus:outline-none"
+							/>
+						</div>
+					</div>
+					{message && message.type === "error" && (
+						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+							{message.text}
+						</div>
+					)}
+					<DialogFooter>
+						<Button onClick={() => setCreating(false)} variant="ghost" size="sm">
+							Cancel
+						</Button>
+						<Button
+							onClick={handleCreate}
+							disabled={!skillForm.name.trim()}
+							loading={createMutation.isPending}
+							size="sm"
+						>
+							Create
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }

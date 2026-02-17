@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
 
-type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser";
+type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "skills";
 
 const SECTIONS: {
 	id: SectionId;
@@ -26,6 +26,7 @@ const SECTIONS: {
 	{ id: "coalesce", label: "Coalesce", group: "config", description: "Message batching", detail: "When multiple messages arrive in quick succession, coalescing batches them into a single LLM turn. This prevents the agent from responding to each message individually in fast-moving conversations." },
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
+	{ id: "skills", label: "Skills", group: "config", description: "Loaded skill definitions", detail: "Skills are directories containing a SKILL.md file with instructions. They are loaded from instance-level and workspace-level skills directories. Workspace skills override instance skills with the same name. Skills are managed on disk, not via the API." },
 ];
 
 interface AgentConfigProps {
@@ -55,7 +56,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab) {
-			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser"];
+			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser", "skills"];
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
 			}
@@ -137,6 +138,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 	const active = SECTIONS.find((s) => s.id === activeSection)!;
 	const isIdentitySection = active.group === "identity";
+	const isSkillsSection = active.id === "skills";
 
 	return (
 		<div className="flex h-full relative">
@@ -187,7 +189,9 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 			{/* Editor */}
 			<div className="flex flex-1 flex-col overflow-hidden">
-				{isIdentitySection ? (
+				{isSkillsSection ? (
+					<SkillsSection agentId={agentId} detail={active.detail} />
+				) : isIdentitySection ? (
 				<IdentityEditor
 					key={active.id}
 					label={active.label}
@@ -352,10 +356,12 @@ interface ConfigSectionEditorProps {
 
 function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
 	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean>>(() => {
-		// Initialize from config based on section
+		// Initialize from config based on section (flat scalar fields only)
 		switch (sectionId) {
-			case "routing":
-				return { ...config.routing };
+			case "routing": {
+				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
+				return { ...flat };
+			}
 			case "tuning":
 				return { ...config.tuning };
 			case "compaction":
@@ -373,6 +379,14 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 		}
 	});
 
+	// Nested objects for routing: task_overrides and fallbacks
+	const [taskOverrides, setTaskOverrides] = useState<Record<string, string>>(
+		() => sectionId === "routing" ? { ...config.routing.task_overrides } : {}
+	);
+	const [fallbacks, setFallbacks] = useState<Record<string, string[]>>(
+		() => sectionId === "routing" ? structuredClone(config.routing.fallbacks) : {}
+	);
+
 	const [localDirty, setLocalDirty] = useState(false);
 
 	useEffect(() => {
@@ -383,9 +397,13 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 	useEffect(() => {
 		if (!localDirty) {
 			switch (sectionId) {
-				case "routing":
-					setLocalValues({ ...config.routing });
+				case "routing": {
+					const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
+					setLocalValues({ ...flat });
+					setTaskOverrides({ ...config.routing.task_overrides });
+					setFallbacks(structuredClone(config.routing.fallbacks));
 					break;
+				}
 				case "tuning":
 					setLocalValues({ ...config.tuning });
 					break;
@@ -414,15 +432,23 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 	}, []);
 
 	const handleSave = useCallback(() => {
-		onSave({ [sectionId]: localValues });
+		if (sectionId === "routing") {
+			onSave({ routing: { ...localValues, task_overrides: taskOverrides, fallbacks } as any });
+		} else {
+			onSave({ [sectionId]: localValues });
+		}
 		setLocalDirty(false);
-	}, [onSave, sectionId, localValues]);
+	}, [onSave, sectionId, localValues, taskOverrides, fallbacks]);
 
 	const handleRevert = useCallback(() => {
 		switch (sectionId) {
-			case "routing":
-				setLocalValues({ ...config.routing });
+			case "routing": {
+				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
+				setLocalValues({ ...flat });
+				setTaskOverrides({ ...config.routing.task_overrides });
+				setFallbacks(structuredClone(config.routing.fallbacks));
 				break;
+			}
 			case "tuning":
 				setLocalValues({ ...config.tuning });
 				break;
@@ -498,6 +524,193 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 							min={0}
 							suffix="s"
 						/>
+
+						{/* Task Overrides */}
+						<div className="mt-4 border-t border-app-line/30 pt-4">
+							<div className="mb-3 flex items-center justify-between">
+								<div>
+									<h4 className="text-sm font-medium text-ink">Task Overrides</h4>
+									<p className="text-tiny text-ink-faint">Override the model used for specific task types (e.g. "coding", "analysis")</p>
+								</div>
+								<Button
+									size="sm"
+									variant="ghost"
+									onClick={() => {
+										setTaskOverrides((prev) => ({ ...prev, "": "" }));
+										setLocalDirty(true);
+									}}
+								>
+									+ Add
+								</Button>
+							</div>
+							<div className="grid gap-3">
+								{Object.entries(taskOverrides).map(([taskType, model], idx) => (
+									<div key={idx} className="flex items-start gap-2">
+										<Input
+											type="text"
+											value={taskType}
+											placeholder="Task type"
+											onChange={(e) => {
+												const newKey = e.target.value;
+												setTaskOverrides((prev) => {
+													const entries = Object.entries(prev);
+													entries[idx] = [newKey, model];
+													return Object.fromEntries(entries);
+												});
+												setLocalDirty(true);
+											}}
+											className="w-36 border-app-line/50 bg-app-darkBox/30"
+										/>
+										<div className="flex-1">
+											<ModelSelect
+												value={model}
+												onChange={(v) => {
+													setTaskOverrides((prev) => {
+														const entries = Object.entries(prev);
+														entries[idx] = [taskType, v];
+														return Object.fromEntries(entries);
+													});
+													setLocalDirty(true);
+												}}
+											/>
+										</div>
+										<Button
+											size="sm"
+											variant="ghost"
+											onClick={() => {
+												setTaskOverrides((prev) => {
+													const entries = Object.entries(prev);
+													entries.splice(idx, 1);
+													return Object.fromEntries(entries);
+												});
+												setLocalDirty(true);
+											}}
+											className="mt-1 text-red-400 hover:text-red-300"
+										>
+											Remove
+										</Button>
+									</div>
+								))}
+								{Object.keys(taskOverrides).length === 0 && (
+									<p className="text-tiny text-ink-faint/50 italic">No task overrides configured</p>
+								)}
+							</div>
+						</div>
+
+						{/* Fallback Chains */}
+						<div className="mt-4 border-t border-app-line/30 pt-4">
+							<div className="mb-3 flex items-center justify-between">
+								<div>
+									<h4 className="text-sm font-medium text-ink">Fallback Chains</h4>
+									<p className="text-tiny text-ink-faint">When a model fails, try fallback models in order</p>
+								</div>
+								<Button
+									size="sm"
+									variant="ghost"
+									onClick={() => {
+										setFallbacks((prev) => ({ ...prev, "": [] }));
+										setLocalDirty(true);
+									}}
+								>
+									+ Add
+								</Button>
+							</div>
+							<div className="grid gap-4">
+								{Object.entries(fallbacks).map(([model, chain], idx) => (
+									<div key={idx} className="rounded-lg border border-app-line/30 bg-app-darkBox/10 p-3">
+										<div className="mb-2 flex items-center gap-2">
+											<span className="text-tiny font-medium text-ink-faint">Primary model:</span>
+											<div className="flex-1">
+												<ModelSelect
+													value={model}
+													onChange={(v) => {
+														setFallbacks((prev) => {
+															const entries = Object.entries(prev);
+															entries[idx] = [v, chain];
+															return Object.fromEntries(entries);
+														});
+														setLocalDirty(true);
+													}}
+												/>
+											</div>
+											<Button
+												size="sm"
+												variant="ghost"
+												onClick={() => {
+													setFallbacks((prev) => {
+														const entries = Object.entries(prev);
+														entries.splice(idx, 1);
+														return Object.fromEntries(entries);
+													});
+													setLocalDirty(true);
+												}}
+												className="text-red-400 hover:text-red-300"
+											>
+												Remove
+											</Button>
+										</div>
+										<div className="ml-4 grid gap-2">
+											{chain.map((fallbackModel, fIdx) => (
+												<div key={fIdx} className="flex items-center gap-2">
+													<span className="text-tiny text-ink-faint/50">#{fIdx + 1}</span>
+													<div className="flex-1">
+														<ModelSelect
+															value={fallbackModel}
+															onChange={(v) => {
+																setFallbacks((prev) => {
+																	const entries = Object.entries(prev);
+																	const newChain = [...entries[idx][1]];
+																	newChain[fIdx] = v;
+																	entries[idx] = [model, newChain];
+																	return Object.fromEntries(entries);
+																});
+																setLocalDirty(true);
+															}}
+														/>
+													</div>
+													<Button
+														size="sm"
+														variant="ghost"
+														onClick={() => {
+															setFallbacks((prev) => {
+																const entries = Object.entries(prev);
+																const newChain = [...entries[idx][1]];
+																newChain.splice(fIdx, 1);
+																entries[idx] = [model, newChain];
+																return Object.fromEntries(entries);
+															});
+															setLocalDirty(true);
+														}}
+														className="text-red-400 hover:text-red-300"
+													>
+														Remove
+													</Button>
+												</div>
+											))}
+											<Button
+												size="sm"
+												variant="ghost"
+												onClick={() => {
+													setFallbacks((prev) => {
+														const entries = Object.entries(prev);
+														const newChain = [...entries[idx][1], ""];
+														entries[idx] = [model, newChain];
+														return Object.fromEntries(entries);
+													});
+													setLocalDirty(true);
+												}}
+												className="w-fit"
+											>
+												+ Add fallback
+											</Button>
+										</div>
+									</div>
+								))}
+								{Object.keys(fallbacks).length === 0 && (
+									<p className="text-tiny text-ink-faint/50 italic">No fallback chains configured</p>
+								)}
+							</div>
+						</div>
 					</div>
 				);
 			case "tuning":
@@ -809,5 +1022,75 @@ function ConfigToggleField({ label, description, value, onChange }: ConfigToggle
 			</div>
 			<Toggle checked={value} onCheckedChange={onChange} size="lg" />
 		</div>
+	);
+}
+
+// -- Skills Section (read-only) --
+
+function SkillsSection({ agentId, detail }: { agentId: string; detail: string }) {
+	const skillsQuery = useQuery({
+		queryKey: ["agent-skills", agentId],
+		queryFn: () => api.agentSkills(agentId),
+		staleTime: 10_000,
+	});
+
+	return (
+		<>
+			<div className="flex items-center justify-between border-b border-app-line/50 bg-app-darkBox/20 px-5 py-2.5">
+				<div className="flex items-center gap-3">
+					<h3 className="text-sm font-medium text-ink">Skills</h3>
+					<span className="text-tiny text-ink-faint">Loaded skill definitions</span>
+				</div>
+				<span className="text-tiny text-ink-faint/50">Read-only &mdash; managed on disk</span>
+			</div>
+			<div className="flex-1 overflow-y-auto px-8 py-8">
+				<div className="mb-6 rounded-lg border border-app-line/30 bg-app-darkBox/20 px-5 py-4">
+					<p className="text-sm leading-relaxed text-ink-dull">{detail}</p>
+				</div>
+
+				{skillsQuery.isLoading && (
+					<div className="flex items-center gap-2 text-ink-dull">
+						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+						Loading skills...
+					</div>
+				)}
+
+				{skillsQuery.isError && (
+					<p className="text-sm text-red-400">Failed to load skills</p>
+				)}
+
+				{skillsQuery.data && skillsQuery.data.skills.length === 0 && (
+					<p className="text-sm text-ink-faint italic">No skills loaded. Add skill directories to your instance or workspace skills/ folder.</p>
+				)}
+
+				{skillsQuery.data && skillsQuery.data.skills.length > 0 && (
+					<div className="grid gap-3">
+						{skillsQuery.data.skills.map((skill) => (
+							<div
+								key={skill.name}
+								className="rounded-lg border border-app-line/30 bg-app-darkBox/10 px-4 py-3"
+							>
+								<div className="flex items-center gap-2">
+									<span className="text-sm font-medium text-ink">{skill.name}</span>
+									<span
+										className={`rounded px-1.5 py-0.5 text-tiny font-medium ${
+											skill.source === "workspace"
+												? "bg-blue-500/10 text-blue-400"
+												: "bg-purple-500/10 text-purple-400"
+										}`}
+									>
+										{skill.source}
+									</span>
+								</div>
+								{skill.description && (
+									<p className="mt-1 text-tiny text-ink-dull">{skill.description}</p>
+								)}
+								<p className="mt-1 font-mono text-tiny text-ink-faint/50">{skill.file_path}</p>
+							</div>
+						))}
+					</div>
+				)}
+			</div>
+		</>
 	);
 }
