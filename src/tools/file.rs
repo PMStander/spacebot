@@ -366,5 +366,3 @@ pub async fn file_list(path: impl AsRef<Path>) -> crate::error::Result<Vec<FileE
         })
         .collect())
 }
-
-use anyhow::Context as _;

@@ -632,24 +632,3 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
         recap
     }
 }
-
-/// Extract the last assistant text message from a history.
-fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
-    for message in history.iter().rev() {
-        if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content.iter()
-                .filter_map(|c| {
-                    if let rig::message::AssistantContent::Text(t) = c {
-                        Some(t.text.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !texts.is_empty() {
-                return Some(texts.join("\n"));
-            }
-        }
-    }
-    None
-}

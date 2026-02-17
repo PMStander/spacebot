@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod cli_worker;
 pub mod config;
 pub mod conversation;
 pub mod daemon;

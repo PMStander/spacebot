@@ -191,6 +191,27 @@ export interface StatusBlockSnapshot {
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
+export interface WorkerRunInfo {
+	id: string;
+	channel_id: string | null;
+	task: string;
+	result: string | null;
+	status: string;
+	started_at: string;
+	completed_at: string | null;
+}
+
+export interface WorkerRunsResponse {
+	runs: WorkerRunInfo[];
+	total: number;
+}
+
+export interface WorkerRunsParams {
+	limit?: number;
+	offset?: number;
+	status?: string;
+}
+
 export interface AgentInfo {
 	id: string;
 	workspace: string;
@@ -653,6 +674,7 @@ export interface ProviderStatus {
 	xai: boolean;
 	mistral: boolean;
 	opencode_zen: boolean;
+	zhipu_sub: boolean;
 }
 
 export interface ProvidersResponse {
@@ -812,6 +834,30 @@ export interface OpenCodeSettingsUpdate {
 	permissions?: Partial<OpenCodePermissions>;
 }
 
+export interface CliBackendSettings {
+	command: string;
+	args: string[];
+	description: string;
+	timeout_secs: number;
+}
+
+export interface CliWorkersSettings {
+	enabled: boolean;
+	backends: Record<string, CliBackendSettings>;
+}
+
+export interface CliBackendSettingsUpdate {
+	command?: string;
+	args?: string[];
+	description?: string;
+	timeout_secs?: number;
+}
+
+export interface CliWorkersSettingsUpdate {
+	enabled?: boolean;
+	backends?: Record<string, CliBackendSettingsUpdate>;
+}
+
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
 	api_enabled: boolean;
@@ -819,6 +865,7 @@ export interface GlobalSettingsResponse {
 	api_bind: string;
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;
+	cli_workers: CliWorkersSettings;
 }
 
 export interface GlobalSettingsUpdate {
@@ -828,6 +875,7 @@ export interface GlobalSettingsUpdate {
 	api_bind?: string;
 	worker_log_mode?: string;
 	opencode?: OpenCodeSettingsUpdate;
+	cli_workers?: CliWorkersSettingsUpdate;
 }
 
 export interface GlobalSettingsUpdateResponse {
@@ -936,6 +984,15 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<AgentConfigResponse>;
+	},
+
+	// Worker runs API
+	workerRuns: (agentId: string, params: WorkerRunsParams = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		if (params.status) search.set("status", params.status);
+		return fetchJson<WorkerRunsResponse>(`/agents/workers?${search}`);
 	},
 
 	// Cron API

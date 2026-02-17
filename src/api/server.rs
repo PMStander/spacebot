@@ -458,6 +458,7 @@ pub async fn start_http_server(
         .route("/agents/cron/executions", get(cron_executions))
         .route("/agents/cron/trigger", post(trigger_cron))
         .route("/agents/cron/toggle", put(toggle_cron))
+        .route("/agents/workers", get(list_worker_runs))
         .route("/channels/cancel", post(cancel_process))
         .route("/agents/ingest/files", get(list_ingest_files).delete(delete_ingest_file))
         .route("/agents/ingest/upload", post(upload_ingest_file))
@@ -2021,6 +2022,91 @@ async fn cancel_process(
     }
 }
 
+// -- Worker runs --
+
+#[derive(Deserialize)]
+struct WorkerRunsQuery {
+    agent_id: String,
+    #[serde(default = "default_worker_runs_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+fn default_worker_runs_limit() -> i64 { 50 }
+
+#[derive(Serialize)]
+struct WorkerRunInfo {
+    id: String,
+    channel_id: Option<String>,
+    task: String,
+    result: Option<String>,
+    status: String,
+    started_at: String,
+    completed_at: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkerRunsResponse {
+    runs: Vec<WorkerRunInfo>,
+    total: i64,
+}
+
+async fn list_worker_runs(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<WorkerRunsQuery>,
+) -> Result<Json<WorkerRunsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let status_filter = query.status.as_deref().unwrap_or("");
+    let has_status_filter = !status_filter.is_empty();
+
+    let total: i64 = if has_status_filter {
+        sqlx::query_scalar("SELECT COUNT(*) FROM worker_runs WHERE status = ?")
+            .bind(status_filter)
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0)
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM worker_runs")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0)
+    };
+
+    let rows = if has_status_filter {
+        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
+            "SELECT id, channel_id, task, result, status, started_at, completed_at \
+             FROM worker_runs WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3"
+        )
+        .bind(status_filter)
+        .bind(query.limit)
+        .bind(query.offset)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
+            "SELECT id, channel_id, task, result, status, started_at, completed_at \
+             FROM worker_runs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2"
+        )
+        .bind(query.limit)
+        .bind(query.offset)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let runs = rows.into_iter().map(|(id, channel_id, task, result, status, started_at, completed_at)| {
+        WorkerRunInfo { id, channel_id, task, result, status, started_at, completed_at }
+    }).collect();
+
+    Ok(Json(WorkerRunsResponse { runs, total }))
+}
+
 // -- Provider management --
 
 #[derive(Serialize)]
@@ -2036,6 +2122,7 @@ struct ProviderStatus {
     xai: bool,
     mistral: bool,
     opencode_zen: bool,
+    zhipu_sub: bool,
 }
 
 #[derive(Serialize)]
@@ -2062,7 +2149,7 @@ async fn get_providers(
     let config_path = state.config_path.read().await.clone();
 
     // Check which providers have keys by reading the config
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
+    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen, zhipu_sub) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2099,6 +2186,7 @@ async fn get_providers(
             has_key("xai_key", "XAI_API_KEY"),
             has_key("mistral_key", "MISTRAL_API_KEY"),
             has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
         )
     } else {
         // No config file — check env vars only
@@ -2114,6 +2202,7 @@ async fn get_providers(
             std::env::var("XAI_API_KEY").is_ok(),
             std::env::var("MISTRAL_API_KEY").is_ok(),
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
+            std::env::var("ZHIPU_SUB_API_KEY").is_ok(),
         )
     };
 
@@ -2129,10 +2218,12 @@ async fn get_providers(
         xai,
         mistral,
         opencode_zen,
+        zhipu_sub,
     };
-    let has_any = providers.anthropic 
-        || providers.openai 
-        || providers.openrouter 
+
+    let has_any = providers.anthropic
+        || providers.openai
+        || providers.openrouter
         || providers.zhipu
         || providers.groq
         || providers.together
@@ -2140,7 +2231,8 @@ async fn get_providers(
         || providers.deepseek
         || providers.xai
         || providers.mistral
-        || providers.opencode_zen;
+        || providers.opencode_zen
+        || providers.zhipu_sub;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -2161,6 +2253,7 @@ async fn update_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
+        "zhipu-sub" => "zhipu_sub_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -2240,6 +2333,11 @@ async fn update_provider(
                 .and_then(|l| l.get("opencode_zen_key"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty()),
+            "zhipu-sub" => doc
+                .get("llm")
+                .and_then(|l| l.get("zhipu_sub_key"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
             _ => false,
         };
 
@@ -2314,6 +2412,7 @@ async fn delete_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
+        "zhipu-sub" => "zhipu_sub_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -2381,6 +2480,13 @@ fn curated_models() -> Vec<ModelInfo> {
     vec![
         // Anthropic (direct)
         ModelInfo {
+            id: "anthropic/claude-opus-4-20250514".into(),
+            name: "Claude Opus 4".into(),
+            provider: "anthropic".into(),
+            context_window: Some(200_000),
+            curated: true,
+        },
+        ModelInfo {
             id: "anthropic/claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
             provider: "anthropic".into(),
@@ -2388,20 +2494,41 @@ fn curated_models() -> Vec<ModelInfo> {
             curated: true,
         },
         ModelInfo {
-            id: "anthropic/claude-haiku-4.5-20250514".into(),
+            id: "anthropic/claude-sonnet-4-5-20250929".into(),
+            name: "Claude Sonnet 4.5".into(),
+            provider: "anthropic".into(),
+            context_window: Some(200_000),
+            curated: true,
+        },
+        ModelInfo {
+            id: "anthropic/claude-haiku-4-5-20251001".into(),
             name: "Claude Haiku 4.5".into(),
             provider: "anthropic".into(),
             context_window: Some(200_000),
             curated: true,
         },
         ModelInfo {
-            id: "anthropic/claude-opus-4-20250514".into(),
-            name: "Claude Opus 4".into(),
+            id: "anthropic/claude-3-5-sonnet-20241022".into(),
+            name: "Claude 3.5 Sonnet".into(),
+            provider: "anthropic".into(),
+            context_window: Some(200_000),
+            curated: true,
+        },
+        ModelInfo {
+            id: "anthropic/claude-3-5-haiku-20241022".into(),
+            name: "Claude 3.5 Haiku".into(),
             provider: "anthropic".into(),
             context_window: Some(200_000),
             curated: true,
         },
         // OpenRouter
+        ModelInfo {
+            id: "openrouter/anthropic/claude-opus-4-20250514".into(),
+            name: "Claude Opus 4".into(),
+            provider: "openrouter".into(),
+            context_window: Some(200_000),
+            curated: true,
+        },
         ModelInfo {
             id: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
@@ -2410,15 +2537,15 @@ fn curated_models() -> Vec<ModelInfo> {
             curated: true,
         },
         ModelInfo {
-            id: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
-            name: "Claude Haiku 4.5".into(),
+            id: "openrouter/anthropic/claude-sonnet-4-5-20250929".into(),
+            name: "Claude Sonnet 4.5".into(),
             provider: "openrouter".into(),
             context_window: Some(200_000),
             curated: true,
         },
         ModelInfo {
-            id: "openrouter/anthropic/claude-opus-4-20250514".into(),
-            name: "Claude Opus 4".into(),
+            id: "openrouter/anthropic/claude-haiku-4-5-20251001".into(),
+            name: "Claude Haiku 4.5".into(),
             provider: "openrouter".into(),
             context_window: Some(200_000),
             curated: true,
@@ -2536,24 +2663,24 @@ fn curated_models() -> Vec<ModelInfo> {
             context_window: Some(200_000),
             curated: true,
         },
-        // Z.ai (GLM)
+        // Z.ai (GLM) - Current models
         ModelInfo {
-            id: "zhipu/glm-4-plus".into(),
-            name: "GLM-4 Plus".into(),
+            id: "zhipu/glm-5".into(),
+            name: "GLM-5".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
         },
         ModelInfo {
-            id: "zhipu/glm-4-flash".into(),
-            name: "GLM-4 Flash".into(),
+            id: "zhipu/glm-4.7".into(),
+            name: "GLM-4.7".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
         },
         ModelInfo {
-            id: "zhipu/glm-4-flashx".into(),
-            name: "GLM-4 FlashX".into(),
+            id: "zhipu/glm-4.6".into(),
+            name: "GLM-4.6".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
@@ -2789,6 +2916,28 @@ fn curated_models() -> Vec<ModelInfo> {
             context_window: None,
             curated: true,
         },
+        // Z.ai Subscription
+        ModelInfo {
+            id: "zhipu-sub/glm-5".into(),
+            name: "GLM-5".into(),
+            provider: "zhipu-sub".into(),
+            context_window: Some(128_000),
+            curated: true,
+        },
+        ModelInfo {
+            id: "zhipu-sub/glm-4.7".into(),
+            name: "GLM-4.7".into(),
+            provider: "zhipu-sub".into(),
+            context_window: Some(128_000),
+            curated: true,
+        },
+        ModelInfo {
+            id: "zhipu-sub/glm-4.6".into(),
+            name: "GLM-4.6".into(),
+            provider: "zhipu-sub".into(),
+            context_window: Some(128_000),
+            curated: true,
+        },
     ]
 }
 
@@ -2915,6 +3064,9 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
     }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
+    }
+    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") {
+        providers.push("zhipu-sub");
     }
 
     providers
@@ -3911,6 +4063,21 @@ struct GlobalSettingsResponse {
     api_bind: String,
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
+    cli_workers: CliWorkersSettingsResponse,
+}
+
+#[derive(Serialize)]
+struct CliWorkersSettingsResponse {
+    enabled: bool,
+    backends: std::collections::HashMap<String, CliBackendSettingsResponse>,
+}
+
+#[derive(Serialize)]
+struct CliBackendSettingsResponse {
+    command: String,
+    args: Vec<String>,
+    description: String,
+    timeout_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -3938,6 +4105,21 @@ struct GlobalSettingsUpdate {
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
+    cli_workers: Option<CliWorkersSettingsUpdate>,
+}
+
+#[derive(Deserialize)]
+struct CliWorkersSettingsUpdate {
+    enabled: Option<bool>,
+    backends: Option<std::collections::HashMap<String, CliBackendSettingsUpdate>>,
+}
+
+#[derive(Deserialize)]
+struct CliBackendSettingsUpdate {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    description: Option<String>,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -3969,7 +4151,7 @@ async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) = if config_path.exists() {
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, cli_workers) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -4063,7 +4245,43 @@ async fn get_global_settings(
             },
         };
 
-        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode)
+        // Parse CLI workers config
+        let cli_table = doc.get("defaults").and_then(|d| d.get("cli_workers"));
+        let cli_backends_table = cli_table.and_then(|c| c.get("backends"));
+        let mut cli_backends = std::collections::HashMap::new();
+        if let Some(backends) = cli_backends_table.and_then(|b| b.as_table()) {
+            for (name, value) in backends.iter() {
+                if let Some(backend_table) = value.as_table() {
+                    cli_backends.insert(name.to_string(), CliBackendSettingsResponse {
+                        command: backend_table.get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        args: backend_table.get("args")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                            .unwrap_or_default(),
+                        description: backend_table.get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        timeout_secs: backend_table.get("timeout_secs")
+                            .and_then(|v| v.as_integer())
+                            .and_then(|i| u64::try_from(i).ok())
+                            .unwrap_or(600),
+                    });
+                }
+            }
+        }
+        let cli_workers = CliWorkersSettingsResponse {
+            enabled: cli_table
+                .and_then(|c| c.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            backends: cli_backends,
+        };
+
+        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode, cli_workers)
     } else {
         (None, true, 19898, "127.0.0.1".to_string(), "errors_only".to_string(), OpenCodeSettingsResponse {
             enabled: false,
@@ -4076,6 +4294,9 @@ async fn get_global_settings(
                 bash: "allow".to_string(),
                 webfetch: "allow".to_string(),
             },
+        }, CliWorkersSettingsResponse {
+            enabled: false,
+            backends: std::collections::HashMap::new(),
         })
     };
     
@@ -4086,6 +4307,7 @@ async fn get_global_settings(
         api_bind,
         worker_log_mode,
         opencode,
+        cli_workers,
     }))
 }
 
@@ -4195,6 +4417,46 @@ async fn update_global_settings(
             }
             if let Some(webfetch) = permissions.webfetch {
                 doc["defaults"]["opencode"]["permissions"]["webfetch"] = toml_edit::value(webfetch);
+            }
+        }
+    }
+
+    // Update CLI workers settings
+    if let Some(cli_workers) = request.cli_workers {
+        if doc.get("defaults").is_none() {
+            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if doc["defaults"].get("cli_workers").is_none() {
+            doc["defaults"]["cli_workers"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+
+        if let Some(enabled) = cli_workers.enabled {
+            doc["defaults"]["cli_workers"]["enabled"] = toml_edit::value(enabled);
+        }
+        if let Some(backends) = cli_workers.backends {
+            if doc["defaults"]["cli_workers"].get("backends").is_none() {
+                doc["defaults"]["cli_workers"]["backends"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            for (name, backend) in backends {
+                if doc["defaults"]["cli_workers"]["backends"].get(&name).is_none() {
+                    doc["defaults"]["cli_workers"]["backends"][&name] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                if let Some(command) = backend.command {
+                    doc["defaults"]["cli_workers"]["backends"][&name]["command"] = toml_edit::value(command);
+                }
+                if let Some(args) = backend.args {
+                    let mut arr = toml_edit::Array::new();
+                    for arg in args {
+                        arr.push(arg);
+                    }
+                    doc["defaults"]["cli_workers"]["backends"][&name]["args"] = toml_edit::value(arr);
+                }
+                if let Some(description) = backend.description {
+                    doc["defaults"]["cli_workers"]["backends"][&name]["description"] = toml_edit::value(description);
+                }
+                if let Some(timeout) = backend.timeout_secs {
+                    doc["defaults"]["cli_workers"]["backends"][&name]["timeout_secs"] = toml_edit::value(timeout as i64);
+                }
             }
         }
     }

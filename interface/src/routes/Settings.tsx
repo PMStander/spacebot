@@ -8,7 +8,7 @@ import {ProviderIcon} from "@/lib/providerIcons";
 import {TagInput} from "@/components/TagInput";
 import {parse as parseToml} from "smol-toml";
 
-type SectionId = "providers" | "channels" | "bindings" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "bindings" | "api-keys" | "server" | "opencode" | "cli-workers" | "worker-logs" | "config-file";
 
 const SECTIONS = [
 	{
@@ -46,6 +46,12 @@ const SECTIONS = [
 		label: "OpenCode",
 		group: "system" as const,
 		description: "OpenCode worker integration",
+	},
+	{
+		id: "cli-workers" as const,
+		label: "CLI Workers",
+		group: "system" as const,
+		description: "External CLI agent backends",
 	},
 	{
 		id: "worker-logs" as const,
@@ -94,6 +100,13 @@ const PROVIDERS = [
 		description: "GPT models",
 		placeholder: "sk-...",
 		envVar: "OPENAI_API_KEY",
+	},
+	{
+		id: "zhipu-sub",
+		name: "Z.ai Subscription",
+		description: "GLM models via Z.ai coding subscription plan",
+		placeholder: "...",
+		envVar: "ZHIPU_SUB_API_KEY",
 	},
 	{
 		id: "zhipu",
@@ -183,7 +196,7 @@ export function Settings() {
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
-		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs",
+		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "cli-workers" || activeSection === "worker-logs",
 	});
 
 	const updateMutation = useMutation({
@@ -238,7 +251,9 @@ export function Settings() {
 
 	const isConfigured = (providerId: string): boolean => {
 		if (!data) return false;
-		return data.providers[providerId as keyof typeof data.providers] ?? false;
+		// Provider IDs use hyphens (e.g. "opencode-zen") but the JSON keys use underscores (e.g. "opencode_zen")
+		const key = providerId.replace(/-/g, "_") as keyof typeof data.providers;
+		return data.providers[key] ?? false;
 	};
 
 	return (
@@ -283,6 +298,18 @@ export function Settings() {
 								required for agents to function.
 							</p>
 						</div>
+
+						{message && (
+							<div
+								className={`mb-4 rounded-md border px-3 py-2 text-sm ${
+									message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+								}`}
+							>
+								{message.text}
+							</div>
+						)}
 
 						{isLoading ? (
 							<div className="flex items-center gap-2 text-ink-dull">
@@ -336,6 +363,8 @@ export function Settings() {
 						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "opencode" ? (
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "cli-workers" ? (
+						<CliWorkersSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "config-file" ? (
@@ -1631,6 +1660,218 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	);
 }
 
+function CliWorkersSection({settings, isLoading}: GlobalSettingsSectionProps) {
+	const queryClient = useQueryClient();
+	const [enabled, setEnabled] = useState(settings?.cli_workers?.enabled ?? false);
+	const [backends, setBackends] = useState<Record<string, {command: string; args: string; description: string; timeout_secs: string}>>(
+		Object.fromEntries(
+			Object.entries(settings?.cli_workers?.backends ?? {}).map(([name, b]) => [
+				name,
+				{command: b.command, args: b.args.join(" "), description: b.description, timeout_secs: b.timeout_secs.toString()},
+			])
+		)
+	);
+	const [newBackendName, setNewBackendName] = useState("");
+	const [message, setMessage] = useState<{text: string; type: "success" | "error"} | null>(null);
+
+	useEffect(() => {
+		if (settings?.cli_workers) {
+			setEnabled(settings.cli_workers.enabled);
+			setBackends(
+				Object.fromEntries(
+					Object.entries(settings.cli_workers.backends).map(([name, b]) => [
+						name,
+						{command: b.command, args: b.args.join(" "), description: b.description, timeout_secs: b.timeout_secs.toString()},
+					])
+				)
+			);
+		}
+	}, [settings?.cli_workers]);
+
+	const updateMutation = useMutation({
+		mutationFn: api.updateGlobalSettings,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const handleSave = () => {
+		const backendsUpdate: Record<string, {command: string; args: string[]; description: string; timeout_secs: number}> = {};
+		for (const [name, b] of Object.entries(backends)) {
+			if (!b.command.trim()) continue;
+			const timeout = parseInt(b.timeout_secs, 10);
+			backendsUpdate[name] = {
+				command: b.command.trim(),
+				args: b.args.trim() ? b.args.trim().split(/\s+/) : [],
+				description: b.description.trim(),
+				timeout_secs: isNaN(timeout) || timeout < 0 ? 600 : timeout,
+			};
+		}
+		updateMutation.mutate({
+			cli_workers: {enabled, backends: backendsUpdate},
+		});
+	};
+
+	const handleAddBackend = () => {
+		const name = newBackendName.trim().toLowerCase().replace(/[^a-z0-9-]/g, "-");
+		if (!name || backends[name]) return;
+		setBackends({...backends, [name]: {command: "", args: "", description: "", timeout_secs: "600"}});
+		setNewBackendName("");
+	};
+
+	const handleRemoveBackend = (name: string) => {
+		const next = {...backends};
+		delete next[name];
+		setBackends(next);
+	};
+
+	const updateBackend = (name: string, field: string, value: string) => {
+		setBackends({...backends, [name]: {...backends[name], [field]: value}});
+	};
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">CLI Worker Backends</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Spawn external CLI coding agents (Factory Droid, Claude Code CLI, etc.) as worker subprocesses. Each backend is a named CLI tool that workers can be dispatched to.
+				</p>
+			</div>
+
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading settings...
+				</div>
+			) : (
+				<div className="flex flex-col gap-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<label className="flex items-center gap-3">
+							<input
+								type="checkbox"
+								checked={enabled}
+								onChange={(e) => setEnabled(e.target.checked)}
+								className="h-4 w-4"
+							/>
+							<div>
+								<span className="text-sm font-medium text-ink">Enable CLI Workers</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Allow agents to spawn external CLI tools as workers
+								</p>
+							</div>
+						</label>
+					</div>
+
+					{enabled && (
+						<>
+							{Object.entries(backends).map(([name, backend]) => (
+								<div key={name} className="rounded-lg border border-app-line bg-app-box p-4">
+									<div className="mb-3 flex items-center justify-between">
+										<span className="text-sm font-medium text-ink">{name}</span>
+										<Button size="sm" variant="ghost" onClick={() => handleRemoveBackend(name)}>
+											Remove
+										</Button>
+									</div>
+									<div className="flex flex-col gap-3">
+										<label className="block">
+											<span className="text-tiny font-medium text-ink-dull">Command</span>
+											<Input
+												type="text"
+												value={backend.command}
+												onChange={(e) => updateBackend(name, "command", e.target.value)}
+												placeholder="droid"
+												className="mt-1"
+											/>
+										</label>
+										<label className="block">
+											<span className="text-tiny font-medium text-ink-dull">Arguments</span>
+											<Input
+												type="text"
+												value={backend.args}
+												onChange={(e) => updateBackend(name, "args", e.target.value)}
+												placeholder="--non-interactive"
+												className="mt-1"
+											/>
+											<p className="mt-0.5 text-tiny text-ink-faint">Space-separated flags passed before the task</p>
+										</label>
+										<label className="block">
+											<span className="text-tiny font-medium text-ink-dull">Description</span>
+											<Input
+												type="text"
+												value={backend.description}
+												onChange={(e) => updateBackend(name, "description", e.target.value)}
+												placeholder="Factory AI Droid"
+												className="mt-1"
+											/>
+										</label>
+										<label className="block">
+											<span className="text-tiny font-medium text-ink-dull">Timeout (seconds)</span>
+											<Input
+												type="number"
+												value={backend.timeout_secs}
+												onChange={(e) => updateBackend(name, "timeout_secs", e.target.value)}
+												min="0"
+												className="mt-1"
+											/>
+										</label>
+									</div>
+								</div>
+							))}
+
+							<div className="flex items-center gap-2">
+								<Input
+									type="text"
+									value={newBackendName}
+									onChange={(e) => setNewBackendName(e.target.value)}
+									placeholder="Backend name (e.g. droid)"
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleAddBackend();
+									}}
+								/>
+								<Button size="sm" variant="outline" onClick={handleAddBackend} disabled={!newBackendName.trim()}>
+									Add Backend
+								</Button>
+							</div>
+						</>
+					)}
+
+					<Button onClick={handleSave} loading={updateMutation.isPending}>
+						Save Changes
+					</Button>
+				</div>
+			)}
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+						message.type === "success"
+							? "border-green-500/20 bg-green-500/10 text-green-400"
+							: "border-red-500/20 bg-red-500/10 text-red-400"
+					}`}
+				>
+					{message.text}
+				</div>
+			)}
+
+			<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+				<p className="text-sm text-ink-faint">
+					CLI workers are spawned as one-shot subprocesses. The task is sent via stdin and the output
+					is captured from stdout. Each backend handles its own authentication (e.g., Anthropic
+					subscription for Claude Code CLI, Factory AI auth for Droid).
+				</p>
+			</div>
+		</div>
+	);
+}
+
 const PERMISSION_OPTIONS = [
 	{value: "allow", label: "Allow", description: "Tool can run without restriction"},
 	{value: "deny", label: "Deny", description: "Tool is completely disabled"},
@@ -2106,3 +2347,4 @@ function ProviderCard({ provider, name, description, configured, onEdit, onRemov
 		</div>
 	);
 }
+

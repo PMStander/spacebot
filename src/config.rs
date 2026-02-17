@@ -1,6 +1,6 @@
 //! Configuration loading and validation.
 
-use crate::error::{ConfigError, Result};
+use crate::error::Result;
 use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
@@ -63,14 +63,15 @@ pub struct LlmConfig {
     pub xai_key: Option<String>,
     pub mistral_key: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub zhipu_sub_key: Option<String>,
 }
 
 impl LlmConfig {
     /// Check if any provider key is configured.
     pub fn has_any_key(&self) -> bool {
-        self.anthropic_key.is_some() 
-            || self.openai_key.is_some() 
-            || self.openrouter_key.is_some() 
+        self.anthropic_key.is_some()
+            || self.openai_key.is_some()
+            || self.openrouter_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -79,6 +80,7 @@ impl LlmConfig {
             || self.xai_key.is_some()
             || self.mistral_key.is_some()
             || self.opencode_zen_key.is_some()
+            || self.zhipu_sub_key.is_some()
     }
 }
 
@@ -102,6 +104,8 @@ pub struct DefaultsConfig {
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
+    /// CLI worker backends (Factory Droid, Claude Code CLI, etc.).
+    pub cli_workers: crate::cli_worker::CliWorkersConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
 }
@@ -385,6 +389,7 @@ impl Default for DefaultsConfig {
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
+            cli_workers: crate::cli_worker::CliWorkersConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
         }
     }
@@ -877,6 +882,7 @@ struct TomlLlmConfig {
     xai_key: Option<String>,
     mistral_key: Option<String>,
     opencode_zen_key: Option<String>,
+    zhipu_sub_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -895,6 +901,7 @@ struct TomlDefaultsConfig {
     browser: Option<TomlBrowserConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
+    cli_workers: Option<TomlCliWorkersConfig>,
     worker_log_mode: Option<String>,
 }
 
@@ -979,6 +986,25 @@ struct TomlOpenCodePermissions {
     edit: Option<String>,
     bash: Option<String>,
     webfetch: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct TomlCliWorkersConfig {
+    enabled: Option<bool>,
+    #[serde(default)]
+    backends: HashMap<String, TomlCliBackendConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlCliBackendConfig {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1191,6 +1217,7 @@ impl Config {
             xai_key: std::env::var("XAI_API_KEY").ok(),
             mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            zhipu_sub_key: std::env::var("ZHIPU_SUB_API_KEY").ok(),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
@@ -1315,6 +1342,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            zhipu_sub_key: toml
+                .llm
+                .zhipu_sub_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ZHIPU_SUB_API_KEY").ok()),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
@@ -1488,6 +1521,35 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.opencode.clone()),
+            cli_workers: toml
+                .defaults
+                .cli_workers
+                .map(|cw| {
+                    let base = &base_defaults.cli_workers;
+                    let mut backends = base.backends.clone();
+                    for (name, backend) in cw.backends {
+                        let resolved_command = resolve_env_value(&backend.command)
+                            .unwrap_or(backend.command);
+                        let mut resolved_env = HashMap::new();
+                        for (key, value) in &backend.env {
+                            if let Some(resolved) = resolve_env_value(value) {
+                                resolved_env.insert(key.clone(), resolved);
+                            }
+                        }
+                        backends.insert(name, crate::cli_worker::CliBackendConfig {
+                            command: resolved_command,
+                            args: backend.args,
+                            description: backend.description.unwrap_or_default(),
+                            env: resolved_env,
+                            timeout_secs: backend.timeout_secs.unwrap_or(600),
+                        });
+                    }
+                    crate::cli_worker::CliWorkersConfig {
+                        enabled: cw.enabled.unwrap_or(base.enabled),
+                        backends,
+                    }
+                })
+                .unwrap_or_else(|| base_defaults.cli_workers.clone()),
             worker_log_mode: toml
                 .defaults
                 .worker_log_mode
@@ -1785,6 +1847,7 @@ pub struct RuntimeConfig {
     pub opencode: ArcSwap<OpenCodeConfig>,
     /// Shared pool of OpenCode server processes. Lazily initialized on first use.
     pub opencode_server_pool: Arc<crate::opencode::OpenCodeServerPool>,
+    pub cli_workers: ArcSwap<crate::cli_worker::CliWorkersConfig>,
     /// Cron store, set after agent initialization.
     pub cron_store: ArcSwap<Option<Arc<crate::cron::CronStore>>>,
     /// Cron scheduler, set after agent initialization.
@@ -1833,6 +1896,7 @@ impl RuntimeConfig {
             skills: ArcSwap::from_pointee(skills),
             opencode: ArcSwap::from_pointee(defaults.opencode.clone()),
             opencode_server_pool: Arc::new(server_pool),
+            cli_workers: ArcSwap::from_pointee(defaults.cli_workers.clone()),
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),

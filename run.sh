@@ -26,6 +26,7 @@ if [ -f ~/.spacebot/spacebot.pid ]; then
     if ps -p $PID > /dev/null 2>&1; then
         echo "⚠️  Spacebot is already running (PID: $PID)"
         echo "   Stopping existing instance..."
+        chmod +x ./target/release/spacebot
         ./target/release/spacebot stop
         sleep 2
     fi

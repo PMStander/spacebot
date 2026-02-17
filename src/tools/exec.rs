@@ -325,5 +325,3 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
 }
-
-use anyhow::Context as _;

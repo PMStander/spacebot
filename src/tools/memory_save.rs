@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::memory::{Memory, MemorySearch, MemoryType};
-use crate::memory::types::{Association, CreateAssociationInput};
+use crate::memory::types::Association;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;

@@ -167,6 +167,20 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 rate_limit_cooldown_secs: 60,
             }
         }
+        "zhipu-sub" => {
+            let channel: String = "zhipu-sub/glm-5".into();
+            let worker: String = "zhipu-sub/glm-4.6".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
         "groq" => {
             let channel: String = "groq/llama-3.3-70b-versatile".into();
             let worker: String = "groq/llama-3.3-70b-specdec".into();
@@ -286,6 +300,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "xai" => "xai/",
         "mistral" => "mistral/",
         "opencode-zen" => "opencode-zen/",
+        "zhipu-sub" => "zhipu-sub/",
         _ => "",
     }
 }

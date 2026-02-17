@@ -1218,6 +1218,96 @@ pub async fn spawn_opencode_worker_from_state(
     Ok(worker_id)
 }
 
+/// Spawn a CLI-backed worker for external coding agents (Factory Droid, Claude Code, etc.).
+///
+/// Instead of a Rig agent loop or OpenCode HTTP server, this spawns a one-shot
+/// CLI subprocess that receives the task via stdin and returns output on stdout.
+pub async fn spawn_cli_worker_from_state(
+    state: &ChannelState,
+    task: impl Into<String>,
+    directory: &str,
+    backend_name: &str,
+    interactive: bool,
+) -> std::result::Result<crate::WorkerId, AgentError> {
+    check_worker_limit(state).await?;
+    let task = task.into();
+    let directory = std::path::PathBuf::from(directory);
+
+    let rc = &state.deps.runtime_config;
+    let cli_config = rc.cli_workers.load();
+
+    if !cli_config.enabled {
+        return Err(AgentError::Other(anyhow::anyhow!(
+            "CLI workers are not enabled in config"
+        )));
+    }
+
+    let backend = cli_config.backends.get(backend_name)
+        .ok_or_else(|| AgentError::Other(anyhow::anyhow!(
+            "CLI backend '{}' not found. Available: {}",
+            backend_name,
+            cli_config.backends.keys().cloned().collect::<Vec<_>>().join(", ")
+        )))?
+        .clone();
+
+    let worker = if interactive {
+        let (worker, input_tx) = crate::cli_worker::CliWorker::new_interactive(
+            Some(state.channel_id.clone()),
+            state.deps.agent_id.clone(),
+            &task,
+            directory,
+            backend_name,
+            backend,
+            state.deps.event_tx.clone(),
+        );
+        let worker_id = worker.id;
+        state.worker_inputs.write().await.insert(worker_id, input_tx);
+        worker
+    } else {
+        crate::cli_worker::CliWorker::new(
+            Some(state.channel_id.clone()),
+            state.deps.agent_id.clone(),
+            &task,
+            directory,
+            backend_name,
+            backend,
+            state.deps.event_tx.clone(),
+        )
+    };
+
+    let worker_id = worker.id;
+
+    let handle = spawn_worker_task(
+        worker_id,
+        state.deps.event_tx.clone(),
+        state.deps.agent_id.clone(),
+        Some(state.channel_id.clone()),
+        async move {
+            let result = worker.run().await?;
+            Ok::<String, anyhow::Error>(result.result_text)
+        },
+    );
+
+    state.worker_handles.write().await.insert(worker_id, handle);
+
+    let cli_task = format!("[cli:{}] {}", backend_name, task);
+    {
+        let mut status = state.status_block.write().await;
+        status.add_worker(worker_id, &cli_task, false);
+    }
+
+    state.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
+        agent_id: state.deps.agent_id.clone(),
+        worker_id,
+        channel_id: Some(state.channel_id.clone()),
+        task: cli_task,
+    }).ok();
+
+    tracing::info!(worker_id = %worker_id, backend = %backend_name, task = %task, "CLI worker spawned");
+
+    Ok(worker_id)
+}
+
 /// Spawn a future as a tokio task that sends a `WorkerComplete` event on completion.
 ///
 /// Handles both success and error cases, logging failures and sending the
