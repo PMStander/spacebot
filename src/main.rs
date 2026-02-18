@@ -479,8 +479,11 @@ async fn run(
     // Create the provider setup channel so API handlers can signal the main loop
     let (provider_tx, mut provider_rx) = mpsc::channel::<spacebot::ProviderSetupEvent>(1);
 
+
+    // Channel for newly created agents to be registered in the main event loop
+    let (agent_tx, mut agent_rx) = mpsc::channel::<spacebot::Agent>(8);
     // Start HTTP API server if enabled
-    let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(provider_tx));
+    let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx));
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
@@ -837,7 +840,11 @@ async fn run(
                     }
                 }
             }
-            Some(event) = provider_rx.recv() => {
+            Some(agent) = agent_rx.recv() => {
+                tracing::info!(agent_id = %agent.id, "registering new agent in main loop");
+                agents.insert(agent.id.clone(), agent);
+            }
+            Some(event) = provider_rx.recv(), if !agents_initialized => {
                 // Reload config from disk
                 let new_config = if config_path.exists() {
                     spacebot::config::Config::load_from_path(&config_path)
