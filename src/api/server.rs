@@ -259,50 +259,72 @@ struct IngestDeleteResponse {
     success: bool,
 }
 
-// -- Skills Types --
+// -- Skill Types --
 
 #[derive(Serialize)]
 struct SkillInfo {
     name: String,
     description: String,
-    source: String,
     file_path: String,
+    base_dir: String,
+    source: String,
 }
 
 #[derive(Serialize)]
-struct AgentSkillsResponse {
+struct SkillsListResponse {
     skills: Vec<SkillInfo>,
 }
 
 #[derive(Deserialize)]
-struct InstanceSkillCreateRequest {
-    name: String,
-    description: String,
-    content: String,
+struct InstallSkillRequest {
+    agent_id: String,
+    spec: String,
+    #[serde(default)]
+    instance: bool,
+}
+
+#[derive(Serialize)]
+struct InstallSkillResponse {
+    installed: Vec<String>,
 }
 
 #[derive(Deserialize)]
-struct InstanceSkillUpdateRequest {
-    name: String,
-    description: Option<String>,
-    content: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct InstanceSkillDeleteQuery {
+struct RemoveSkillRequest {
+    agent_id: String,
     name: String,
 }
 
 #[derive(Serialize)]
-struct InstanceSkillsResponse {
-    skills: Vec<SkillInfo>,
-    skills_dir: String,
-}
-
-#[derive(Serialize)]
-struct InstanceSkillActionResponse {
+struct RemoveSkillResponse {
     success: bool,
-    message: String,
+    path: Option<String>,
+}
+
+// -- Skills Registry Types (skills.sh proxy) --
+
+#[derive(Serialize, Deserialize, Clone)]
+struct RegistrySkill {
+    source: String,
+    #[serde(rename = "skillId")]
+    skill_id: String,
+    name: String,
+    installs: u64,
+    /// Only present in search results
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RegistryBrowseResponse {
+    skills: Vec<RegistrySkill>,
+    has_more: bool,
+}
+
+#[derive(Serialize)]
+struct RegistrySearchResponse {
+    skills: Vec<RegistrySkill>,
+    query: String,
+    count: usize,
 }
 
 // -- Agent Config Types --
@@ -516,7 +538,6 @@ pub async fn start_http_server(
         .route("/agents/avatar/upload", post(upload_agent_avatar))
         .route("/agents/identity", get(get_identity).put(update_identity))
         .route("/agents/config", get(get_agent_config).put(update_agent_config))
-        .route("/agents/skills", get(get_agent_skills))
         .route("/agents/cron", get(list_cron_jobs).post(create_or_update_cron).delete(delete_cron))
         .route("/agents/cron/executions", get(cron_executions))
         .route("/agents/cron/trigger", post(trigger_cron))
@@ -525,6 +546,11 @@ pub async fn start_http_server(
         .route("/channels/cancel", post(cancel_process))
         .route("/agents/ingest/files", get(list_ingest_files).delete(delete_ingest_file))
         .route("/agents/ingest/upload", post(upload_ingest_file))
+        .route("/agents/skills", get(list_skills))
+        .route("/agents/skills/install", post(install_skill))
+        .route("/agents/skills/remove", delete(remove_skill))
+        .route("/skills/registry/browse", get(registry_browse))
+        .route("/skills/registry/search", get(registry_search))
         .route("/providers", get(get_providers).put(update_provider))
         .route("/providers/{provider}", delete(delete_provider))
         .route("/models", get(get_models))
@@ -532,7 +558,6 @@ pub async fn start_http_server(
         .route("/messaging/status", get(messaging_status))
         .route("/bindings", get(list_bindings).post(create_binding).put(update_binding).delete(delete_binding))
         .route("/settings", get(get_global_settings).put(update_global_settings))
-        .route("/settings/skills", get(list_instance_skills).post(create_instance_skill).put(update_instance_skill).delete(delete_instance_skill))
         .route("/config/raw", get(get_raw_config).put(update_raw_config))
         .route("/update/check", get(update_check).post(update_check_now))
         .route("/update/apply", post(update_apply));
@@ -928,6 +953,7 @@ async fn events_sse(
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
                             ApiEvent::ToolStarted { .. } => "tool_started",
                             ApiEvent::ToolCompleted { .. } => "tool_completed",
+                            ApiEvent::ConfigReloaded => "config_reloaded",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)
@@ -1561,36 +1587,6 @@ async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
-}
-
-// -- Skills handler --
-
-async fn get_agent_skills(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<AgentConfigQuery>,
-) -> Result<Json<AgentSkillsResponse>, StatusCode> {
-    let runtime_configs = state.runtime_configs.load();
-    let rc = runtime_configs
-        .get(&query.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let skill_set = rc.skills.load();
-    let mut skills: Vec<SkillInfo> = skill_set
-        .iter()
-        .map(|s| SkillInfo {
-            name: s.name.clone(),
-            description: s.description.clone(),
-            source: match s.source {
-                crate::skills::SkillSource::Instance => "instance".to_string(),
-                crate::skills::SkillSource::Workspace => "workspace".to_string(),
-            },
-            file_path: s.file_path.display().to_string(),
-        })
-        .collect();
-
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-
-    Ok(Json(AgentSkillsResponse { skills }))
 }
 
 // -- Agent config handlers --
@@ -3591,6 +3587,227 @@ async fn delete_ingest_file(
     Ok(Json(IngestDeleteResponse { success: true }))
 }
 
+// -- Skills --
+
+#[derive(Deserialize)]
+struct SkillsQuery {
+    agent_id: String,
+}
+
+/// List installed skills for an agent.
+async fn list_skills(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<SkillsQuery>,
+) -> Result<Json<SkillsListResponse>, StatusCode> {
+    let configs = state.agent_configs.load();
+    let agent = configs.iter().find(|a| a.id == query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    
+    let instance_dir = state.instance_dir.load();
+    let instance_skills_dir = instance_dir.join("skills");
+    let workspace_skills_dir = agent.workspace.join("skills");
+    
+    let skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
+    
+    let skill_infos: Vec<SkillInfo> = skills
+        .list()
+        .into_iter()
+        .map(|s| SkillInfo {
+            name: s.name,
+            description: s.description,
+            file_path: s.file_path.display().to_string(),
+            base_dir: s.base_dir.display().to_string(),
+            source: match s.source {
+                crate::skills::SkillSource::Instance => "instance".to_string(),
+                crate::skills::SkillSource::Workspace => "workspace".to_string(),
+            },
+        })
+        .collect();
+    
+    Ok(Json(SkillsListResponse { skills: skill_infos }))
+}
+
+/// Install a skill from GitHub.
+async fn install_skill(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::Json(req): axum::extract::Json<InstallSkillRequest>,
+) -> Result<Json<InstallSkillResponse>, StatusCode> {
+    let configs = state.agent_configs.load();
+    let agent = configs.iter().find(|a| a.id == req.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    
+    let target_dir = if req.instance {
+        state.instance_dir.load().as_ref().join("skills")
+    } else {
+        agent.workspace.join("skills")
+    };
+    
+    let installed = crate::skills::install_from_github(&req.spec, &target_dir)
+        .await
+        .map_err(|e| {
+            tracing::warn!("failed to install skill: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    
+    state.send_event(ApiEvent::ConfigReloaded);
+    
+    Ok(Json(InstallSkillResponse { installed }))
+}
+
+/// Remove an installed skill.
+async fn remove_skill(
+    State(state): State<Arc<ApiState>>,
+    axum::extract::Json(req): axum::extract::Json<RemoveSkillRequest>,
+) -> Result<Json<RemoveSkillResponse>, StatusCode> {
+    let configs = state.agent_configs.load();
+    let agent = configs.iter().find(|a| a.id == req.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    
+    let instance_dir = state.instance_dir.load();
+    let instance_skills_dir = instance_dir.join("skills");
+    let workspace_skills_dir = agent.workspace.join("skills");
+    
+    let mut skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
+    
+    let removed_path = skills.remove(&req.name).await.map_err(|error| {
+        tracing::warn!(%error, skill = %req.name, "failed to remove skill");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    
+    // Trigger a config reload to update the skill list
+    state.send_event(ApiEvent::ConfigReloaded);
+    
+    tracing::info!(
+        agent_id = %req.agent_id,
+        skill = %req.name,
+        "skill removed"
+    );
+    
+    Ok(Json(RemoveSkillResponse {
+        success: removed_path.is_some(),
+        path: removed_path.map(|p| p.display().to_string()),
+    }))
+}
+
+// -- Skills Registry Proxy --
+
+#[derive(Deserialize)]
+struct RegistryBrowseQuery {
+    /// One of: all-time, trending, hot
+    #[serde(default = "default_registry_view")]
+    view: String,
+    #[serde(default)]
+    page: u32,
+}
+
+fn default_registry_view() -> String {
+    "all-time".into()
+}
+
+/// Proxy browse requests to skills.sh leaderboard API.
+async fn registry_browse(
+    Query(query): Query<RegistryBrowseQuery>,
+) -> Result<Json<RegistryBrowseResponse>, StatusCode> {
+    let view = match query.view.as_str() {
+        "all-time" | "trending" | "hot" => &query.view,
+        _ => "all-time",
+    };
+
+    let url = format!(
+        "https://skills.sh/api/skills/{}/{}",
+        view, query.page
+    );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "skills.sh registry browse request failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    if !response.status().is_success() {
+        tracing::warn!(status = %response.status(), "skills.sh returned error");
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    #[derive(Deserialize)]
+    struct UpstreamResponse {
+        skills: Vec<RegistrySkill>,
+        #[serde(default)]
+        #[serde(rename = "hasMore")]
+        has_more: bool,
+    }
+
+    let body: UpstreamResponse = response.json().await.map_err(|error| {
+        tracing::warn!(%error, "failed to parse skills.sh response");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(RegistryBrowseResponse {
+        skills: body.skills,
+        has_more: body.has_more,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RegistrySearchQuery {
+    q: String,
+    #[serde(default = "default_registry_search_limit")]
+    limit: u32,
+}
+
+fn default_registry_search_limit() -> u32 {
+    50
+}
+
+/// Proxy search requests to skills.sh search API.
+async fn registry_search(
+    Query(query): Query<RegistrySearchQuery>,
+) -> Result<Json<RegistrySearchResponse>, StatusCode> {
+    if query.q.len() < 2 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://skills.sh/api/search")
+        .query(&[("q", &query.q), ("limit", &query.limit.min(100).to_string())])
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "skills.sh search request failed");
+            StatusCode::BAD_GATEWAY
+        })?;
+
+    if !response.status().is_success() {
+        tracing::warn!(status = %response.status(), "skills.sh search returned error");
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+
+    #[derive(Deserialize)]
+    struct UpstreamSearchResponse {
+        skills: Vec<RegistrySkill>,
+        count: usize,
+        query: String,
+    }
+
+    let body: UpstreamSearchResponse = response.json().await.map_err(|error| {
+        tracing::warn!(%error, "failed to parse skills.sh search response");
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(RegistrySearchResponse {
+        skills: body.skills,
+        query: body.query,
+        count: body.count,
+    }))
+}
+
 // -- Messaging / Bindings --
 
 #[derive(Serialize, Clone)]
@@ -3795,6 +4012,9 @@ struct PlatformCredentials {
     /// Slack app token.
     #[serde(default)]
     slack_app_token: Option<String>,
+    /// Telegram bot token.
+    #[serde(default)]
+    telegram_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3832,6 +4052,7 @@ async fn create_binding(
     // Track adapters that need to be started at runtime
     let mut new_discord_token: Option<String> = None;
     let mut new_slack_tokens: Option<(String, String)> = None;
+    let mut new_telegram_token: Option<String> = None;
 
     // Write platform credentials if provided
     if let Some(credentials) = &request.platform_credentials {
@@ -3865,6 +4086,21 @@ async fn create_binding(
                 slack["bot_token"] = toml_edit::value(bot_token.as_str());
                 slack["app_token"] = toml_edit::value(app_token);
                 new_slack_tokens = Some((bot_token.clone(), app_token.to_string()));
+            }
+        }
+        if let Some(token) = &credentials.telegram_token {
+            if !token.is_empty() {
+                if doc.get("messaging").is_none() {
+                    doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                let messaging = doc["messaging"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                if !messaging.contains_key("telegram") {
+                    messaging["telegram"] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                let telegram = messaging["telegram"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                telegram["enabled"] = toml_edit::value(true);
+                telegram["token"] = toml_edit::value(token.as_str());
+                new_telegram_token = Some(token.clone());
             }
         }
     }
@@ -3994,6 +4230,20 @@ async fn create_binding(
                 let adapter = crate::messaging::slack::SlackAdapter::new(&bot_token, &app_token, slack_perms);
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start slack adapter");
+                }
+            }
+
+            if let Some(token) = new_telegram_token {
+                let telegram_perms = {
+                    let perms = crate::config::TelegramPermissions::from_config(
+                        new_config.messaging.telegram.as_ref().expect("telegram config exists when token is provided"),
+                        &new_config.bindings,
+                    );
+                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                };
+                let adapter = crate::messaging::telegram::TelegramAdapter::new(&token, telegram_perms);
+                if let Err(error) = manager.register_and_start(adapter).await {
+                    tracing::error!(%error, "failed to hot-start telegram adapter");
                 }
             }
         }
@@ -4761,257 +5011,6 @@ async fn update_global_settings(
         success: true,
         message,
         requires_restart,
-    }))
-}
-
-// -- Instance Skills handlers --
-
-/// Helper: get the instance skills directory from any agent's RuntimeConfig.
-fn get_instance_skills_dir(state: &ApiState) -> Result<std::path::PathBuf, StatusCode> {
-    let runtime_configs = state.runtime_configs.load();
-    let rc = runtime_configs.values().next().ok_or(StatusCode::NOT_FOUND)?;
-    Ok(rc.instance_dir.join("skills"))
-}
-
-async fn list_instance_skills(
-    State(state): State<Arc<ApiState>>,
-) -> Result<Json<InstanceSkillsResponse>, StatusCode> {
-    let skills_dir = get_instance_skills_dir(&state)?;
-
-    let mut skills = Vec::new();
-    if skills_dir.is_dir() {
-        if let Ok(mut entries) = tokio::fs::read_dir(&skills_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.path();
-                if !path.is_dir() { continue; }
-                let skill_file = path.join("SKILL.md");
-                if !skill_file.exists() { continue; }
-
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                let description = match tokio::fs::read_to_string(&skill_file).await {
-                    Ok(content) => extract_skill_description(&content),
-                    Err(_) => String::new(),
-                };
-
-                skills.push(SkillInfo {
-                    name,
-                    description,
-                    source: "instance".to_string(),
-                    file_path: skill_file.display().to_string(),
-                });
-            }
-        }
-    }
-
-    skills.sort_by(|a, b| a.name.cmp(&b.name));
-
-    Ok(Json(InstanceSkillsResponse {
-        skills,
-        skills_dir: skills_dir.display().to_string(),
-    }))
-}
-
-/// Extract the description from SKILL.md frontmatter.
-fn extract_skill_description(content: &str) -> String {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return String::new();
-    }
-    let after_opening = &trimmed[3..];
-    let Some(end_pos) = after_opening.find("\n---") else {
-        return String::new();
-    };
-    let frontmatter = &after_opening[..end_pos];
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("description:") {
-            let rest = rest.trim();
-            return rest
-                .trim_start_matches('"').trim_end_matches('"')
-                .trim_start_matches('\'').trim_end_matches('\'')
-                .to_string();
-        }
-    }
-    String::new()
-}
-
-async fn create_instance_skill(
-    State(state): State<Arc<ApiState>>,
-    axum::Json(request): axum::Json<InstanceSkillCreateRequest>,
-) -> Result<Json<InstanceSkillActionResponse>, StatusCode> {
-    let skills_dir = get_instance_skills_dir(&state)?;
-
-    // Sanitize the name for use as a directory name
-    let dir_name = request.name.trim().to_lowercase().replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
-    if dir_name.is_empty() {
-        return Ok(Json(InstanceSkillActionResponse {
-            success: false,
-            message: "Skill name is required".to_string(),
-        }));
-    }
-
-    let skill_dir = skills_dir.join(&dir_name);
-    if skill_dir.exists() {
-        return Ok(Json(InstanceSkillActionResponse {
-            success: false,
-            message: format!("Skill directory '{}' already exists", dir_name),
-        }));
-    }
-
-    // Create directory and SKILL.md
-    tokio::fs::create_dir_all(&skill_dir).await.map_err(|error| {
-        tracing::warn!(%error, "failed to create skill directory");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let skill_content = format!(
-        "---\nname: {}\ndescription: {}\n---\n\n{}",
-        request.name.trim(),
-        request.description.trim(),
-        request.content.trim(),
-    );
-
-    tokio::fs::write(skill_dir.join("SKILL.md"), &skill_content).await.map_err(|error| {
-        tracing::warn!(%error, "failed to write SKILL.md");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    tracing::info!(name = %dir_name, "instance skill created via API");
-
-    Ok(Json(InstanceSkillActionResponse {
-        success: true,
-        message: format!("Skill '{}' created", dir_name),
-    }))
-}
-
-async fn update_instance_skill(
-    State(state): State<Arc<ApiState>>,
-    axum::Json(request): axum::Json<InstanceSkillUpdateRequest>,
-) -> Result<Json<InstanceSkillActionResponse>, StatusCode> {
-    let skills_dir = get_instance_skills_dir(&state)?;
-
-    let dir_name = request.name.trim().to_lowercase().replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
-    let skill_file = skills_dir.join(&dir_name).join("SKILL.md");
-
-    if !skill_file.exists() {
-        return Ok(Json(InstanceSkillActionResponse {
-            success: false,
-            message: format!("Skill '{}' not found", dir_name),
-        }));
-    }
-
-    // Read existing content
-    let existing = tokio::fs::read_to_string(&skill_file).await.map_err(|error| {
-        tracing::warn!(%error, "failed to read SKILL.md");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // If full content is provided, replace everything
-    if let Some(ref content) = request.content {
-        // If description is also updated, rebuild frontmatter
-        let description = request.description.as_deref().unwrap_or_else(|| {
-            // Extract existing description
-            &""
-        });
-
-        let new_content = if request.description.is_some() {
-            format!(
-                "---\nname: {}\ndescription: {}\n---\n\n{}",
-                request.name.trim(),
-                description.trim(),
-                content.trim(),
-            )
-        } else {
-            // Preserve existing frontmatter, just replace body
-            let trimmed = existing.trim_start();
-            if trimmed.starts_with("---") {
-                let after_opening = &trimmed[3..];
-                if let Some(end_pos) = after_opening.find("\n---") {
-                    let frontmatter = &trimmed[..3 + end_pos + 4];
-                    format!("{}\n\n{}", frontmatter, content.trim())
-                } else {
-                    content.clone()
-                }
-            } else {
-                content.clone()
-            }
-        };
-
-        tokio::fs::write(&skill_file, &new_content).await.map_err(|error| {
-            tracing::warn!(%error, "failed to write SKILL.md");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    } else if let Some(ref description) = request.description {
-        // Only update description in frontmatter
-        let trimmed = existing.trim_start();
-        if trimmed.starts_with("---") {
-            let after_opening = &trimmed[3..];
-            if let Some(end_pos) = after_opening.find("\n---") {
-                let body_start = 3 + end_pos + 4;
-                let body = &trimmed[body_start..];
-
-                // Extract name from existing frontmatter
-                let mut name = request.name.clone();
-                for line in after_opening[..end_pos].lines() {
-                    let line = line.trim();
-                    if let Some(rest) = line.strip_prefix("name:") {
-                        name = rest.trim().trim_matches('"').trim_matches('\'').to_string();
-                    }
-                }
-
-                let new_content = format!(
-                    "---\nname: {}\ndescription: {}\n---{}",
-                    name.trim(),
-                    description.trim(),
-                    body,
-                );
-
-                tokio::fs::write(&skill_file, &new_content).await.map_err(|error| {
-                    tracing::warn!(%error, "failed to write SKILL.md");
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?;
-            }
-        }
-    }
-
-    tracing::info!(name = %dir_name, "instance skill updated via API");
-
-    Ok(Json(InstanceSkillActionResponse {
-        success: true,
-        message: format!("Skill '{}' updated", dir_name),
-    }))
-}
-
-async fn delete_instance_skill(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<InstanceSkillDeleteQuery>,
-) -> Result<Json<InstanceSkillActionResponse>, StatusCode> {
-    let skills_dir = get_instance_skills_dir(&state)?;
-
-    let dir_name = query.name.trim().to_lowercase().replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "-");
-    let skill_dir = skills_dir.join(&dir_name);
-
-    if !skill_dir.exists() || !skill_dir.is_dir() {
-        return Ok(Json(InstanceSkillActionResponse {
-            success: false,
-            message: format!("Skill '{}' not found", dir_name),
-        }));
-    }
-
-    tokio::fs::remove_dir_all(&skill_dir).await.map_err(|error| {
-        tracing::warn!(%error, "failed to delete skill directory");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    tracing::info!(name = %dir_name, "instance skill deleted via API");
-
-    Ok(Json(InstanceSkillActionResponse {
-        success: true,
-        message: format!("Skill '{}' deleted", dir_name),
     }))
 }
 
