@@ -3,10 +3,12 @@
 use crate::agent::channel::ChannelState;
 use crate::agent::cortex_chat::CortexChatSession;
 use crate::agent::status::StatusBlock;
-use crate::config::{Binding, DiscordPermissions, RuntimeConfig, SlackPermissions};
+use crate::config::{Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SlackPermissions};
 use crate::cron::{CronStore, Scheduler};
-use crate::memory::MemorySearch;
+use crate::llm::LlmManager;
+use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
+use crate::prompts::PromptEngine;
 use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
 
@@ -72,6 +74,16 @@ pub struct ApiState {
     pub update_status: SharedUpdateStatus,
     /// Instance directory path for accessing instance-level skills.
     pub instance_dir: ArcSwap<PathBuf>,
+    /// Shared LLM manager for agent creation.
+    pub llm_manager: RwLock<Option<Arc<LlmManager>>>,
+    /// Shared embedding model for agent creation.
+    pub embedding_model: RwLock<Option<Arc<EmbeddingModel>>>,
+    /// Prompt engine snapshot for agent creation.
+    pub prompt_engine: RwLock<Option<PromptEngine>>,
+    /// Instance-level defaults for resolving new agent configs.
+    pub defaults_config: RwLock<Option<DefaultsConfig>>,
+    /// Sender to register newly created agents with the main event loop.
+    pub agent_tx: mpsc::Sender<crate::Agent>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -153,7 +165,10 @@ pub enum ApiEvent {
 }
 
 impl ApiState {
-    pub fn new_with_provider_sender(provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>) -> Self {
+    pub fn new_with_provider_sender(
+        provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
+        agent_tx: mpsc::Sender<crate::Agent>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
             started_at: Instant::now(),
@@ -176,6 +191,11 @@ impl ApiState {
             provider_setup_tx,
             update_status: crate::update::new_shared_status(),
             instance_dir: ArcSwap::from_pointee(PathBuf::new()),
+            llm_manager: RwLock::new(None),
+            embedding_model: RwLock::new(None),
+            prompt_engine: RwLock::new(None),
+            defaults_config: RwLock::new(None),
+            agent_tx,
         }
     }
 
@@ -364,6 +384,26 @@ impl ApiState {
     /// Set the instance directory path.
     pub fn set_instance_dir(&self, dir: PathBuf) {
         self.instance_dir.store(Arc::new(dir));
+    }
+
+    /// Set the shared LLM manager for runtime agent creation.
+    pub async fn set_llm_manager(&self, manager: Arc<LlmManager>) {
+        *self.llm_manager.write().await = Some(manager);
+    }
+
+    /// Set the shared embedding model for runtime agent creation.
+    pub async fn set_embedding_model(&self, model: Arc<EmbeddingModel>) {
+        *self.embedding_model.write().await = Some(model);
+    }
+
+    /// Set the prompt engine snapshot for runtime agent creation.
+    pub async fn set_prompt_engine(&self, engine: PromptEngine) {
+        *self.prompt_engine.write().await = Some(engine);
+    }
+
+    /// Set the instance-level defaults for runtime agent creation.
+    pub async fn set_defaults_config(&self, defaults: DefaultsConfig) {
+        *self.defaults_config.write().await = Some(defaults);
     }
 
     /// Send an event to all SSE subscribers.
