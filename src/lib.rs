@@ -28,11 +28,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Signal from the API to the main event loop to trigger provider setup.
+/// Signal from the API to the main event loop to trigger provider setup or agent creation.
 #[derive(Debug)]
 pub enum ProviderSetupEvent {
     /// New provider keys have been added. Reinitialize agents.
     ProvidersConfigured,
+    /// A new agent has been added to config.toml. Reinitialize to pick it up.
+    AgentCreated,
 }
 
 /// Agent identifier type.

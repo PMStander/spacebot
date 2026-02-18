@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentSummary } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { formatTimeAgo, formatUptime } from "@/lib/format";
@@ -224,7 +224,23 @@ function seedGradient(seed: string): [string, string] {
 	];
 }
 
-function AgentAvatar({ seed, size = 64 }: { seed: string; size?: number }) {
+function AgentAvatar({ seed, avatarUrl, size = 64 }: { seed: string; avatarUrl?: string; size?: number }) {
+	const [imgError, setImgError] = useState(false);
+
+	if (avatarUrl && !imgError) {
+		return (
+			<img
+				src={avatarUrl}
+				alt="avatar"
+				width={size}
+				height={size}
+				className="flex-shrink-0 rounded-full object-cover"
+				style={{ width: size, height: size }}
+				onError={() => setImgError(true)}
+			/>
+		);
+	}
+
 	const [c1, c2] = seedGradient(seed);
 	const gradientId = `avatar-${seed.replace(/[^a-z0-9]/gi, "")}`;
 	return (
@@ -268,6 +284,27 @@ function AgentCard({
 	const profile = agent.profile;
 	const displayName = profile?.display_name ?? agent.id;
 	const avatarSeed = profile?.avatar_seed ?? agent.id;
+	const queryClient = useQueryClient();
+	const fileInputRef = useRef<HTMLInputElement>(null);
+	const [avatarTs, setAvatarTs] = useState(() => Date.now());
+
+	const avatarUrl = profile?.avatar_path
+		? `${api.avatarUrl(agent.id)}&t=${avatarTs}`
+		: undefined;
+
+	const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+		const file = e.target.files?.[0];
+		if (!file) return;
+		try {
+			await api.uploadAvatar(agent.id, file);
+			setAvatarTs(Date.now());
+			queryClient.invalidateQueries({ queryKey: ["overview"] });
+		} catch (err) {
+			console.error("Avatar upload failed:", err);
+		}
+		// Reset so the same file can be re-selected
+		e.target.value = "";
+	};
 
 	return (
 		<Link
@@ -297,16 +334,36 @@ function AgentCard({
 				)}
 			</div>
 
-			{/* Avatar — overlapping the banner */}
+			{/* Avatar — overlapping the banner, click to upload */}
 			<div className="relative px-5 -mt-8">
-				<div className="relative inline-block">
+				<div
+					className="relative inline-block cursor-pointer"
+					onClick={(e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						fileInputRef.current?.click();
+					}}
+				>
 					<div className="rounded-full border-[3px] border-app-darkBox">
-						<AgentAvatar seed={avatarSeed} size={64} />
+						<AgentAvatar seed={avatarSeed} avatarUrl={avatarUrl} size={64} />
+					</div>
+					{/* Upload overlay on hover */}
+					<div className="absolute inset-0 flex items-center justify-center rounded-full bg-black/50 opacity-0 transition-opacity hover:opacity-100">
+						<svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
+							<path fillRule="evenodd" d="M4 5a2 2 0 00-2 2v8a2 2 0 002 2h12a2 2 0 002-2V7a2 2 0 00-2-2h-1.586a1 1 0 01-.707-.293l-1.121-1.121A2 2 0 0011.172 3H8.828a2 2 0 00-1.414.586L6.293 4.707A1 1 0 015.586 5H4zm6 9a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+						</svg>
 					</div>
 					<div
 						className={`absolute bottom-0.5 right-0.5 h-4 w-4 rounded-full border-[2.5px] border-app-darkBox ${
 							isActive ? "bg-green-500" : "bg-gray-500"
 						}`}
+					/>
+					<input
+						ref={fileInputRef}
+						type="file"
+						accept="image/*"
+						className="hidden"
+						onChange={handleAvatarUpload}
 					/>
 				</div>
 			</div>

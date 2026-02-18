@@ -593,10 +593,8 @@ async fn run(
                     }
                 }
             }
-            Some(_event) = provider_rx.recv(), if !agents_initialized => {
-                tracing::info!("provider keys configured, initializing agents");
-
-                // Reload config from disk to pick up new keys
+            Some(event) = provider_rx.recv() => {
+                // Reload config from disk
                 let new_config = if config_path.exists() {
                     spacebot::config::Config::load_from_path(&config_path)
                 } else {
@@ -606,64 +604,111 @@ async fn run(
                     spacebot::config::Config::load_from_env(&instance_dir)
                 };
 
-                match new_config {
-                    Ok(new_config) if new_config.llm.has_any_key() => {
-                        // Rebuild LlmManager with the new keys
-                        match spacebot::llm::LlmManager::new(new_config.llm.clone()).await {
-                            Ok(new_llm) => {
-                                let new_llm_manager = Arc::new(new_llm);
-                                let mut new_watcher_agents = Vec::new();
-                                let mut new_discord_permissions = None;
-                                let mut new_slack_permissions = None;
-                                let mut new_telegram_permissions = None;
-                                match initialize_agents(
-                                    &new_config,
-                                    &new_llm_manager,
-                                    &embedding_model,
-                                    &prompt_engine,
-                                    &api_state,
-                                    &mut agents,
-                                    &mut messaging_manager,
-                                    &mut inbound_stream,
-                                    &mut cron_schedulers_for_shutdown,
-                                    &mut _ingestion_handles,
-                                    &mut _cortex_handles,
-                                    &mut new_watcher_agents,
-                                    &mut new_discord_permissions,
-                                    &mut new_slack_permissions,
-                                    &mut new_telegram_permissions,
-                                ).await {
-                                    Ok(()) => {
-                                        agents_initialized = true;
-                                        // Restart file watcher with the new agent data
-                                        _file_watcher = spacebot::config::spawn_file_watcher(
-                                            config_path.clone(),
-                                            new_config.instance_dir.clone(),
-                                            new_watcher_agents,
-                                            new_discord_permissions,
-                                            new_slack_permissions,
-                                            new_telegram_permissions,
-                                            bindings.clone(),
-                                            Some(messaging_manager.clone()),
-                                        );
-                                        tracing::info!("agents initialized after provider setup");
+                match event {
+                    spacebot::ProviderSetupEvent::ProvidersConfigured if !agents_initialized => {
+                        tracing::info!("provider keys configured, initializing agents");
+                        match new_config {
+                            Ok(new_config) if new_config.llm.has_any_key() => {
+                                match spacebot::llm::LlmManager::new(new_config.llm.clone()).await {
+                                    Ok(new_llm) => {
+                                        let new_llm_manager = Arc::new(new_llm);
+                                        let mut new_watcher_agents = Vec::new();
+                                        let mut new_discord_permissions = None;
+                                        let mut new_slack_permissions = None;
+                                        let mut new_telegram_permissions = None;
+                                        match initialize_agents(
+                                            &new_config,
+                                            &new_llm_manager,
+                                            &embedding_model,
+                                            &prompt_engine,
+                                            &api_state,
+                                            &mut agents,
+                                            &mut messaging_manager,
+                                            &mut inbound_stream,
+                                            &mut cron_schedulers_for_shutdown,
+                                            &mut _ingestion_handles,
+                                            &mut _cortex_handles,
+                                            &mut new_watcher_agents,
+                                            &mut new_discord_permissions,
+                                            &mut new_slack_permissions,
+                                            &mut new_telegram_permissions,
+                                        ).await {
+                                            Ok(()) => {
+                                                agents_initialized = true;
+                                                _file_watcher = spacebot::config::spawn_file_watcher(
+                                                    config_path.clone(),
+                                                    new_config.instance_dir.clone(),
+                                                    new_watcher_agents,
+                                                    new_discord_permissions,
+                                                    new_slack_permissions,
+                                                    new_telegram_permissions,
+                                                    bindings.clone(),
+                                                    Some(messaging_manager.clone()),
+                                                );
+                                                tracing::info!("agents initialized after provider setup");
+                                            }
+                                            Err(error) => {
+                                                tracing::error!(%error, "failed to initialize agents after provider setup");
+                                            }
+                                        }
                                     }
                                     Err(error) => {
-                                        tracing::error!(%error, "failed to initialize agents after provider setup");
+                                        tracing::error!(%error, "failed to create LLM manager with new keys");
                                     }
                                 }
                             }
+                            Ok(_) => {
+                                tracing::warn!("config reloaded but still no provider keys");
+                            }
                             Err(error) => {
-                                tracing::error!(%error, "failed to create LLM manager with new keys");
+                                tracing::error!(%error, "failed to reload config after provider setup");
                             }
                         }
                     }
-                    Ok(_) => {
-                        tracing::warn!("config reloaded but still no provider keys");
+                    spacebot::ProviderSetupEvent::AgentCreated if agents_initialized => {
+                        tracing::info!("new agent created, reinitializing agents");
+                        if let Ok(new_config) = new_config {
+                            let mut new_watcher_agents = Vec::new();
+                            let mut new_discord_permissions = None;
+                            let mut new_slack_permissions = None;
+                            let mut new_telegram_permissions = None;
+                            match initialize_agents(
+                                &new_config,
+                                &llm_manager,
+                                &embedding_model,
+                                &prompt_engine,
+                                &api_state,
+                                &mut agents,
+                                &mut messaging_manager,
+                                &mut inbound_stream,
+                                &mut cron_schedulers_for_shutdown,
+                                &mut _ingestion_handles,
+                                &mut _cortex_handles,
+                                &mut new_watcher_agents,
+                                &mut new_discord_permissions,
+                                &mut new_slack_permissions,
+                                &mut new_telegram_permissions,
+                            ).await {
+                                Ok(()) => {
+                                    _file_watcher = spacebot::config::spawn_file_watcher(
+                                        config_path.clone(),
+                                        new_config.instance_dir.clone(),
+                                        new_watcher_agents,
+                                        new_discord_permissions,
+                                        new_slack_permissions,
+                                        new_telegram_permissions,
+                                        bindings.clone(),
+                                        Some(messaging_manager.clone()),
+                                    );
+                                    tracing::info!("agents reinitialized after new agent creation");
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "failed to reinitialize agents after new agent creation");
+                                }
+                            }
+                        }
                     }
-                    Err(error) => {
-                        tracing::error!(%error, "failed to reload config after provider setup");
-                    }
+                    _ => {}
                 }
             }
             _ = shutdown_rx.wait_for(|shutdown| *shutdown) => {
@@ -726,6 +771,13 @@ async fn initialize_agents(
     let resolved_agents = config.resolve_agents();
 
     for agent_config in &resolved_agents {
+        // Skip agents that are already initialized
+        let agent_id_arc: spacebot::AgentId = agent_config.id.clone().into();
+        if agents.contains_key(&agent_id_arc) {
+            tracing::info!(agent_id = %agent_config.id, "agent already initialized, skipping");
+            continue;
+        }
+
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
 
         // Ensure agent directories exist

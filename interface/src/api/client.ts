@@ -253,6 +253,7 @@ export interface AgentProfile {
 	status: string | null;
 	bio: string | null;
 	avatar_seed: string | null;
+	avatar_path: string | null;
 	generated_at: string;
 	updated_at: string;
 }
@@ -936,6 +937,17 @@ export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
 	agents: () => fetchJson<AgentsResponse>("/agents"),
+	createAgent: async (agentId: string) => {
+		const response = await fetch(`${API_BASE}/agents`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ agent_id: string }>;
+	},
 	agentOverview: (agentId: string) =>
 		fetchJson<AgentOverviewResponse>(`/agents/overview?agent_id=${encodeURIComponent(agentId)}`),
 	channels: () => fetchJson<ChannelsResponse>("/channels"),
@@ -998,6 +1010,20 @@ export const api = {
 		}),
 	agentProfile: (agentId: string) =>
 		fetchJson<AgentProfileResponse>(`/agents/profile?agent_id=${encodeURIComponent(agentId)}`),
+	uploadAvatar: async (agentId: string, file: File) => {
+		const formData = new FormData();
+		formData.append("file", file);
+		const response = await fetch(
+			`${API_BASE}/agents/avatar/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ filename: string }>;
+	},
+	avatarUrl: (agentId: string) =>
+		`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
 	agentIdentity: (agentId: string) =>
 		fetchJson<IdentityFiles>(`/agents/identity?agent_id=${encodeURIComponent(agentId)}`),
 	updateIdentity: async (request: IdentityUpdateRequest) => {

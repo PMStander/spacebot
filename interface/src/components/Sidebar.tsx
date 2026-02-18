@@ -1,6 +1,6 @@
-import { useMemo } from "react";
-import { Link, useMatchRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, useMemo } from "react";
+import { Link, useMatchRoute, useNavigate } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { api, type ChannelInfo } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
@@ -31,8 +31,28 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	const channels = channelsData?.channels ?? [];
 
 	const matchRoute = useMatchRoute();
+	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const isOverview = matchRoute({ to: "/" });
 	const isSettings = matchRoute({ to: "/settings" });
+
+	const handleCreateAgent = useCallback(async () => {
+		const name = window.prompt("Enter a name for the new agent:")?.trim().toLowerCase().replace(/\s+/g, "-");
+		if (!name) return;
+		try {
+			await api.createAgent(name);
+			// Wait for the agent to be initialized by the backend
+			for (let i = 0; i < 20; i++) {
+				await new Promise((r) => setTimeout(r, 500));
+				const data = await api.agents();
+				if (data.agents.some((a) => a.id === name)) break;
+			}
+			await queryClient.invalidateQueries({ queryKey: ["agents"] });
+			navigate({ to: "/agents/$agentId/config", params: { agentId: name } });
+		} catch (error) {
+			window.alert(error instanceof Error ? error.message : "Failed to create agent");
+		}
+	}, [navigate, queryClient]);
 
 	const agentActivity = useMemo(() => {
 		const byAgent: Record<string, { workers: number; branches: number }> = {};
@@ -193,6 +213,7 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 							variant="outline"
 							size="sm"
 							className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
+							onClick={handleCreateAgent}
 						>
 							+ New Agent
 						</Button>

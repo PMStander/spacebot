@@ -205,6 +205,16 @@ struct IdentityQuery {
 }
 
 #[derive(Deserialize)]
+struct CreateAgentRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct CreateAgentResponse {
+    agent_id: String,
+}
+
+#[derive(Deserialize)]
 struct IdentityUpdateRequest {
     agent_id: String,
     soul: Option<String>,
@@ -489,7 +499,7 @@ pub async fn start_http_server(
         .route("/status", get(status))
         .route("/overview", get(instance_overview))
         .route("/events", get(events_sse))
-        .route("/agents", get(list_agents))
+        .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/overview", get(agent_overview))
         .route("/channels", get(list_channels))
         .route("/channels/messages", get(channel_messages))
@@ -502,6 +512,8 @@ pub async fn start_http_server(
         .route("/cortex-chat/messages", get(cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex_chat_send))
         .route("/agents/profile", get(get_agent_profile))
+        .route("/agents/avatar", get(get_agent_avatar))
+        .route("/agents/avatar/upload", post(upload_agent_avatar))
         .route("/agents/identity", get(get_identity).put(update_identity))
         .route("/agents/config", get(get_agent_config).put(update_agent_config))
         .route("/agents/skills", get(get_agent_skills))
@@ -569,6 +581,63 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
 async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse> {
     let agents = state.agent_configs.load();
     Json(AgentsResponse { agents: agents.as_ref().clone() })
+}
+
+/// Create a new agent by adding it to config.toml and triggering reinitialization.
+async fn create_agent(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(request): axum::Json<CreateAgentRequest>,
+) -> Result<Json<CreateAgentResponse>, StatusCode> {
+    let agent_id = request.agent_id.trim().to_lowercase().replace(' ', "-");
+    if agent_id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Check if agent already exists
+    let agents = state.agent_configs.load();
+    if agents.iter().any(|a| a.id == agent_id) {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    if config_path.as_os_str().is_empty() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // Read and parse config.toml
+    let config_content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut doc = config_content.parse::<toml_edit::DocumentMut>()
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to parse config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Create the agent entry
+    find_or_create_agent_table(&mut doc, &agent_id)?;
+
+    // Write back
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::info!(agent_id = %agent_id, "new agent created via API");
+
+    // Trigger reinitialization so the agent is fully set up
+    state
+        .provider_setup_tx
+        .try_send(crate::ProviderSetupEvent::AgentCreated)
+        .ok();
+
+    Ok(Json(CreateAgentResponse { agent_id }))
 }
 
 /// Get overview stats for an agent: memory breakdown, channels, cron, cortex.
@@ -1315,6 +1384,118 @@ async fn get_agent_profile(
 #[derive(Serialize)]
 struct AgentProfileResponse {
     profile: Option<crate::agent::cortex::AgentProfile>,
+}
+
+// -- Avatar upload/serve handlers --
+
+/// Upload a custom avatar image for an agent.
+async fn upload_agent_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AgentOverviewQuery>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let workspaces = state.agent_workspaces.load();
+    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    // Store avatars in a data/avatars directory alongside the workspace
+    let avatars_dir = workspace.join("..").join("data").join("avatars");
+    tokio::fs::create_dir_all(&avatars_dir).await.map_err(|error| {
+        tracing::warn!(%error, "failed to create avatars directory");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let filename = field
+        .file_name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "avatar.png".to_string());
+
+    let data = field.bytes().await.map_err(|error| {
+        tracing::warn!(%error, "failed to read avatar upload");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    if data.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Determine extension from the uploaded filename
+    let ext = Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+
+    let safe_filename = format!("{}.{}", query.agent_id, ext);
+    let target = avatars_dir.join(&safe_filename);
+
+    tokio::fs::write(&target, &data).await.map_err(|error| {
+        tracing::warn!(%error, path = %target.display(), "failed to write avatar file");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Update the database
+    let pools = state.agent_pools.load();
+    if let Some(pool) = pools.get(&query.agent_id) {
+        let _ = sqlx::query(
+            "UPDATE agent_profile SET avatar_path = ?, updated_at = datetime('now') WHERE agent_id = ?",
+        )
+        .bind(&safe_filename)
+        .bind(&query.agent_id)
+        .execute(pool)
+        .await;
+    }
+
+    Ok(Json(serde_json::json!({ "filename": safe_filename })))
+}
+
+/// Serve an agent's avatar image.
+async fn get_agent_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AgentOverviewQuery>,
+) -> Result<Response, StatusCode> {
+    let workspaces = state.agent_workspaces.load();
+    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let avatars_dir = workspace.join("..").join("data").join("avatars");
+
+    // Try to find the avatar file by checking common extensions
+    let extensions = ["png", "jpg", "jpeg", "gif", "webp"];
+    let mut avatar_path = None;
+
+    for ext in &extensions {
+        let candidate = avatars_dir.join(format!("{}.{}", query.agent_id, ext));
+        if candidate.exists() {
+            avatar_path = Some(candidate);
+            break;
+        }
+    }
+
+    let path = avatar_path.ok_or(StatusCode::NOT_FOUND)?;
+
+    let data = tokio::fs::read(&path).await.map_err(|error| {
+        tracing::warn!(%error, path = %path.display(), "failed to read avatar file");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let content_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    };
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, content_type)],
+        data,
+    )
+        .into_response())
 }
 
 // -- Identity file handlers --

@@ -517,6 +517,7 @@ pub struct AgentProfile {
     pub status: Option<String>,
     pub bio: Option<String>,
     pub avatar_seed: Option<String>,
+    pub avatar_path: Option<String>,
     pub generated_at: String,
     pub updated_at: String,
 }
@@ -524,7 +525,7 @@ pub struct AgentProfile {
 /// Load the current profile for an agent, if one exists.
 pub async fn load_profile(pool: &SqlitePool, agent_id: &str) -> Option<AgentProfile> {
     sqlx::query_as::<_, AgentProfileRow>(
-        "SELECT agent_id, display_name, status, bio, avatar_seed, generated_at, updated_at FROM agent_profile WHERE agent_id = ?",
+        "SELECT agent_id, display_name, status, bio, avatar_seed, avatar_path, generated_at, updated_at FROM agent_profile WHERE agent_id = ?",
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -541,6 +542,7 @@ struct AgentProfileRow {
     status: Option<String>,
     bio: Option<String>,
     avatar_seed: Option<String>,
+    avatar_path: Option<String>,
     generated_at: chrono::NaiveDateTime,
     updated_at: chrono::NaiveDateTime,
 }
@@ -553,6 +555,7 @@ impl AgentProfileRow {
             status: self.status,
             bio: self.bio,
             avatar_seed: self.avatar_seed,
+            avatar_path: self.avatar_path,
             generated_at: self.generated_at.and_utc().to_rfc3339(),
             updated_at: self.updated_at.and_utc().to_rfc3339(),
         }
