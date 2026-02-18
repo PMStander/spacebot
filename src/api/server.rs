@@ -39,6 +39,13 @@ struct HealthResponse {
 }
 
 #[derive(Serialize)]
+struct IdleResponse {
+    idle: bool,
+    active_workers: usize,
+    active_branches: usize,
+}
+
+#[derive(Serialize)]
 struct StatusResponse {
     status: &'static str,
     version: &'static str,
@@ -205,16 +212,6 @@ struct IdentityQuery {
 }
 
 #[derive(Deserialize)]
-struct CreateAgentRequest {
-    agent_id: String,
-}
-
-#[derive(Serialize)]
-struct CreateAgentResponse {
-    agent_id: String,
-}
-
-#[derive(Deserialize)]
 struct IdentityUpdateRequest {
     agent_id: String,
     soul: Option<String>,
@@ -337,8 +334,6 @@ struct RoutingSection {
     compactor: String,
     cortex: String,
     rate_limit_cooldown_secs: u64,
-    task_overrides: HashMap<String, String>,
-    fallbacks: HashMap<String, Vec<String>>,
 }
 
 #[derive(Serialize, Debug)]
@@ -443,8 +438,6 @@ struct RoutingUpdate {
     compactor: Option<String>,
     cortex: Option<String>,
     rate_limit_cooldown_secs: Option<u64>,
-    task_overrides: Option<HashMap<String, String>>,
-    fallbacks: Option<HashMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -518,6 +511,7 @@ pub async fn start_http_server(
 
     let api_routes = Router::new()
         .route("/health", get(health))
+        .route("/idle", get(idle))
         .route("/status", get(status))
         .route("/overview", get(instance_overview))
         .route("/events", get(events_sse))
@@ -534,15 +528,12 @@ pub async fn start_http_server(
         .route("/cortex-chat/messages", get(cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex_chat_send))
         .route("/agents/profile", get(get_agent_profile))
-        .route("/agents/avatar", get(get_agent_avatar))
-        .route("/agents/avatar/upload", post(upload_agent_avatar))
         .route("/agents/identity", get(get_identity).put(update_identity))
         .route("/agents/config", get(get_agent_config).put(update_agent_config))
         .route("/agents/cron", get(list_cron_jobs).post(create_or_update_cron).delete(delete_cron))
         .route("/agents/cron/executions", get(cron_executions))
         .route("/agents/cron/trigger", post(trigger_cron))
         .route("/agents/cron/toggle", put(toggle_cron))
-        .route("/agents/workers", get(list_worker_runs))
         .route("/channels/cancel", post(cancel_process))
         .route("/agents/ingest/files", get(list_ingest_files).delete(delete_ingest_file))
         .route("/agents/ingest/upload", post(upload_ingest_file))
@@ -594,6 +585,26 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Reports whether the instance is idle (no active workers or branches).
+/// Used by the platform to gate rolling updates.
+async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {
+    let blocks = state.channel_status_blocks.read().await;
+    let mut total_workers = 0;
+    let mut total_branches = 0;
+
+    for status_block in blocks.values() {
+        let block = status_block.read().await;
+        total_workers += block.active_workers.len();
+        total_branches += block.active_branches.len();
+    }
+
+    Json(IdleResponse {
+        idle: total_workers == 0 && total_branches == 0,
+        active_workers: total_workers,
+        active_branches: total_branches,
+    })
+}
+
 async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
     Json(StatusResponse {
@@ -610,61 +621,359 @@ async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse>
     Json(AgentsResponse { agents: agents.as_ref().clone() })
 }
 
-/// Create a new agent by adding it to config.toml and triggering reinitialization.
+/// Create a new agent and initialize it live (directories, databases, memory, identity, cron, cortex).
 async fn create_agent(
     State(state): State<Arc<ApiState>>,
-    axum::Json(request): axum::Json<CreateAgentRequest>,
-) -> Result<Json<CreateAgentResponse>, StatusCode> {
-    let agent_id = request.agent_id.trim().to_lowercase().replace(' ', "-");
+    Json(request): Json<CreateAgentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let agent_id = request.agent_id.trim().to_string();
     if agent_id.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "Agent ID cannot be empty"
+        })));
     }
 
     // Check if agent already exists
-    let agents = state.agent_configs.load();
-    if agents.iter().any(|a| a.id == agent_id) {
-        return Err(StatusCode::CONFLICT);
+    {
+        let existing = state.agent_configs.load();
+        if existing.iter().any(|a| a.id == agent_id) {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' already exists")
+            })));
+        }
     }
 
     let config_path = state.config_path.read().await.clone();
-    if config_path.as_os_str().is_empty() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    let instance_dir = (**state.instance_dir.load()).clone();
 
-    // Read and parse config.toml
-    let config_content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|error| {
+    // Write agent entry to config.toml
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
             tracing::warn!(%error, "failed to read config.toml");
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        })?
+    } else {
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let mut doc = config_content.parse::<toml_edit::DocumentMut>()
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to parse config.toml");
+    if doc.get("agents").is_none() {
+        doc["agents"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let agents_array = doc["agents"]
+        .as_array_of_tables_mut()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut new_table = toml_edit::Table::new();
+    new_table["id"] = toml_edit::value(&agent_id);
+    agents_array.push(new_table);
+
+    tokio::fs::write(&config_path, doc.to_string()).await.map_err(|error| {
+        tracing::warn!(%error, "failed to write config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Resolve the agent config using instance defaults
+    let defaults = state.defaults_config.read().await;
+    let defaults = defaults.as_ref().ok_or_else(|| {
+        tracing::error!("defaults config not available");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let raw_config = crate::config::AgentConfig {
+        id: agent_id.clone(),
+        default: false,
+        workspace: None,
+        routing: None,
+        max_concurrent_branches: None,
+        max_concurrent_workers: None,
+        max_turns: None,
+        branch_max_turns: None,
+        context_window: None,
+        compaction: None,
+        memory_persistence: None,
+        coalesce: None,
+        ingestion: None,
+        cortex: None,
+        browser: None,
+        brave_search_key: None,
+        cron: Vec::new(),
+    };
+    let agent_config = raw_config.resolve(&instance_dir, defaults);
+    drop(defaults);
+
+    // Create directories
+    for dir in [
+        &agent_config.workspace,
+        &agent_config.data_dir,
+        &agent_config.archives_dir,
+        &agent_config.ingest_dir(),
+        &agent_config.logs_dir(),
+    ] {
+        std::fs::create_dir_all(dir).map_err(|error| {
+            tracing::error!(%error, dir = %dir.display(), "failed to create agent directory");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    }
 
-    // Create the agent entry
-    find_or_create_agent_table(&mut doc, &agent_id)?;
+    // Connect databases
+    let db = crate::db::Db::connect(&agent_config.data_dir).await.map_err(|error| {
+        tracing::error!(%error, agent_id = %agent_id, "failed to connect agent databases");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    // Write back
-    tokio::fs::write(&config_path, doc.to_string())
+    // Settings store
+    let settings_path = agent_config.data_dir.join("settings.redb");
+    let settings_store = std::sync::Arc::new(
+        crate::settings::SettingsStore::new(&settings_path).map_err(|error| {
+            tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    );
+
+    // Memory system
+    let embedding_model = {
+        let guard = state.embedding_model.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("embedding model not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+    let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
+            tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    tracing::info!(agent_id = %agent_id, "new agent created via API");
+    if let Err(error) = embedding_table.ensure_fts_index().await {
+        tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
+    }
 
-    // Trigger reinitialization so the agent is fully set up
-    state
-        .provider_setup_tx
-        .try_send(crate::ProviderSetupEvent::AgentCreated)
-        .ok();
+    let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(
+        memory_store,
+        embedding_table,
+        embedding_model,
+    ));
 
-    Ok(Json(CreateAgentResponse { agent_id }))
+    // Event bus
+    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
+
+    // Identity scaffolding
+    crate::identity::scaffold_identity_files(&agent_config.workspace)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, agent_id = %agent_id, "failed to scaffold identity files");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let identity = crate::identity::Identity::load(&agent_config.workspace).await;
+
+    // Skills
+    let skills = crate::skills::SkillSet::load(
+        &instance_dir.join("skills"),
+        &agent_config.skills_dir(),
+    ).await;
+
+    // Prompt engine
+    let prompt_engine = {
+        let guard = state.prompt_engine.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("prompt engine not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // Defaults for RuntimeConfig
+    let defaults_for_runtime = {
+        let guard = state.defaults_config.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("defaults config not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // RuntimeConfig
+    let runtime_config = std::sync::Arc::new(crate::config::RuntimeConfig::new(
+        &instance_dir,
+        &agent_config,
+        &defaults_for_runtime,
+        prompt_engine,
+        identity,
+        skills,
+    ));
+    runtime_config.set_settings(settings_store.clone());
+
+    // LLM manager
+    let llm_manager = {
+        let guard = state.llm_manager.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("LLM manager not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // Build deps
+    let deps = crate::AgentDeps {
+        agent_id: arc_agent_id.clone(),
+        memory_search: memory_search.clone(),
+        llm_manager,
+        cron_tool: None,
+        runtime_config: runtime_config.clone(),
+        event_tx: event_tx.clone(),
+        sqlite_pool: db.sqlite.clone(),
+    };
+
+    // Register event stream with API
+    let event_rx = event_tx.subscribe();
+    state.register_agent_events(agent_id.clone(), event_rx);
+
+    // Cron setup
+    let cron_store = std::sync::Arc::new(crate::cron::CronStore::new(db.sqlite.clone()));
+    let cron_context = crate::cron::CronContext {
+        deps: deps.clone(),
+        screenshot_dir: agent_config.screenshot_dir(),
+        logs_dir: agent_config.logs_dir(),
+        messaging_manager: {
+            let guard = state.messaging_manager.read().await;
+            guard.as_ref().cloned().unwrap_or_else(|| std::sync::Arc::new(crate::messaging::MessagingManager::new()))
+        },
+        store: cron_store.clone(),
+    };
+    let scheduler = std::sync::Arc::new(crate::cron::Scheduler::new(cron_context));
+    runtime_config.set_cron(cron_store.clone(), scheduler.clone());
+
+    let cron_tool = crate::tools::CronTool::new(cron_store.clone(), scheduler.clone());
+
+    // Cortex chat session
+    let browser_config = (**runtime_config.browser_config.load()).clone();
+    let brave_search_key = (**runtime_config.brave_search_key.load()).clone();
+    let conversation_logger = crate::conversation::history::ConversationLogger::new(db.sqlite.clone());
+    let channel_store = crate::conversation::ChannelStore::new(db.sqlite.clone());
+    let cortex_tool_server = crate::tools::create_cortex_chat_tool_server(
+        memory_search.clone(),
+        conversation_logger,
+        channel_store,
+        browser_config,
+        agent_config.screenshot_dir(),
+        brave_search_key,
+        runtime_config.workspace_dir.clone(),
+        runtime_config.instance_dir.clone(),
+    );
+    let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
+    let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
+        deps.clone(),
+        cortex_tool_server,
+        cortex_store,
+    );
+
+    // Spawn cortex loops
+    let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
+    tokio::spawn({
+        let deps = deps.clone();
+        let logger = cortex_logger.clone();
+        async move {
+            crate::agent::cortex::spawn_bulletin_loop(deps, logger).await;
+        }
+    });
+    tokio::spawn({
+        let deps = deps.clone();
+        async move {
+            crate::agent::cortex::spawn_association_loop(deps, cortex_logger).await;
+        }
+    });
+
+    // Spawn ingestion if enabled
+    let ingestion_config = **runtime_config.ingestion.load();
+    if ingestion_config.enabled {
+        crate::agent::ingestion::spawn_ingestion_loop(
+            agent_config.ingest_dir(),
+            deps.clone(),
+        );
+    }
+
+    // Build the Agent and send to main loop so it can receive messages
+    let sqlite_pool = db.sqlite.clone();
+    let mut deps_with_cron = deps.clone();
+    deps_with_cron.cron_tool = Some(cron_tool);
+    let agent = crate::Agent {
+        id: arc_agent_id.clone(),
+        config: agent_config.clone(),
+        db,
+        deps: deps_with_cron,
+    };
+    if let Err(error) = state.agent_tx.send(agent).await {
+        tracing::error!(%error, "failed to send new agent to main loop");
+    }
+
+    // Update all ArcSwap-based API state maps
+    {
+        // Agent pools
+        let mut pools = (**state.agent_pools.load()).clone();
+        pools.insert(agent_id.clone(), sqlite_pool);
+        state.agent_pools.store(std::sync::Arc::new(pools));
+
+        // Memory searches
+        let mut searches = (**state.memory_searches.load()).clone();
+        searches.insert(agent_id.clone(), memory_search);
+        state.memory_searches.store(std::sync::Arc::new(searches));
+
+        // Agent workspaces
+        let mut workspaces = (**state.agent_workspaces.load()).clone();
+        workspaces.insert(agent_id.clone(), agent_config.workspace.clone());
+        state.agent_workspaces.store(std::sync::Arc::new(workspaces));
+
+        // Runtime configs
+        let mut configs = (**state.runtime_configs.load()).clone();
+        configs.insert(agent_id.clone(), runtime_config);
+        state.runtime_configs.store(std::sync::Arc::new(configs));
+
+        // Agent config summaries
+        let mut agent_infos = (**state.agent_configs.load()).clone();
+        agent_infos.push(AgentInfo {
+            id: agent_config.id.clone(),
+            workspace: agent_config.workspace.clone(),
+            context_window: agent_config.context_window,
+            max_turns: agent_config.max_turns,
+            max_concurrent_branches: agent_config.max_concurrent_branches,
+            max_concurrent_workers: agent_config.max_concurrent_workers,
+        });
+        state.agent_configs.store(std::sync::Arc::new(agent_infos));
+
+        // Cron stores and schedulers
+        let mut cron_stores = (**state.cron_stores.load()).clone();
+        cron_stores.insert(agent_id.clone(), cron_store);
+        state.cron_stores.store(std::sync::Arc::new(cron_stores));
+
+        let mut cron_schedulers = (**state.cron_schedulers.load()).clone();
+        cron_schedulers.insert(agent_id.clone(), scheduler);
+        state.cron_schedulers.store(std::sync::Arc::new(cron_schedulers));
+
+        // Cortex chat sessions
+        let mut sessions = (**state.cortex_chat_sessions.load()).clone();
+        sessions.insert(agent_id.clone(), std::sync::Arc::new(cortex_session));
+        state.cortex_chat_sessions.store(std::sync::Arc::new(sessions));
+    }
+
+    tracing::info!(agent_id = %agent_id, "agent created and initialized via API");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "agent_id": agent_id,
+        "message": format!("Agent '{agent_id}' created and running")
+    })))
+}
+
+#[derive(Deserialize)]
+struct CreateAgentRequest {
+    agent_id: String,
 }
 
 /// Get overview stats for an agent: memory breakdown, channels, cron, cortex.
@@ -1414,118 +1723,6 @@ struct AgentProfileResponse {
     profile: Option<crate::agent::cortex::AgentProfile>,
 }
 
-// -- Avatar upload/serve handlers --
-
-/// Upload a custom avatar image for an agent.
-async fn upload_agent_avatar(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<AgentOverviewQuery>,
-    mut multipart: axum::extract::Multipart,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    // Store avatars in a data/avatars directory alongside the workspace
-    let avatars_dir = workspace.join("..").join("data").join("avatars");
-    tokio::fs::create_dir_all(&avatars_dir).await.map_err(|error| {
-        tracing::warn!(%error, "failed to create avatars directory");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let filename = field
-        .file_name()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "avatar.png".to_string());
-
-    let data = field.bytes().await.map_err(|error| {
-        tracing::warn!(%error, "failed to read avatar upload");
-        StatusCode::BAD_REQUEST
-    })?;
-
-    if data.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // Determine extension from the uploaded filename
-    let ext = Path::new(&filename)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-
-    let safe_filename = format!("{}.{}", query.agent_id, ext);
-    let target = avatars_dir.join(&safe_filename);
-
-    tokio::fs::write(&target, &data).await.map_err(|error| {
-        tracing::warn!(%error, path = %target.display(), "failed to write avatar file");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    // Update the database
-    let pools = state.agent_pools.load();
-    if let Some(pool) = pools.get(&query.agent_id) {
-        let _ = sqlx::query(
-            "UPDATE agent_profile SET avatar_path = ?, updated_at = datetime('now') WHERE agent_id = ?",
-        )
-        .bind(&safe_filename)
-        .bind(&query.agent_id)
-        .execute(pool)
-        .await;
-    }
-
-    Ok(Json(serde_json::json!({ "filename": safe_filename })))
-}
-
-/// Serve an agent's avatar image.
-async fn get_agent_avatar(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<AgentOverviewQuery>,
-) -> Result<Response, StatusCode> {
-    let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let avatars_dir = workspace.join("..").join("data").join("avatars");
-
-    // Try to find the avatar file by checking common extensions
-    let extensions = ["png", "jpg", "jpeg", "gif", "webp"];
-    let mut avatar_path = None;
-
-    for ext in &extensions {
-        let candidate = avatars_dir.join(format!("{}.{}", query.agent_id, ext));
-        if candidate.exists() {
-            avatar_path = Some(candidate);
-            break;
-        }
-    }
-
-    let path = avatar_path.ok_or(StatusCode::NOT_FOUND)?;
-
-    let data = tokio::fs::read(&path).await.map_err(|error| {
-        tracing::warn!(%error, path = %path.display(), "failed to read avatar file");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let content_type = match path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        _ => "application/octet-stream",
-    };
-
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        data,
-    )
-        .into_response())
-}
-
 // -- Identity file handlers --
 
 /// Get identity files (SOUL.md, IDENTITY.md, USER.md) for an agent.
@@ -1619,8 +1816,6 @@ async fn get_agent_config(
             compactor: routing.compactor.clone(),
             cortex: routing.cortex.clone(),
             rate_limit_cooldown_secs: routing.rate_limit_cooldown_secs,
-            task_overrides: routing.task_overrides.clone(),
-            fallbacks: routing.fallbacks.clone(),
         },
         tuning: TuningSection {
             max_concurrent_branches: **rc.max_concurrent_branches.load(),
@@ -1830,27 +2025,6 @@ fn update_routing_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, rout
     if let Some(ref v) = routing.compactor { table["compactor"] = toml_edit::value(v.as_str()); }
     if let Some(ref v) = routing.cortex { table["cortex"] = toml_edit::value(v.as_str()); }
     if let Some(v) = routing.rate_limit_cooldown_secs { table["rate_limit_cooldown_secs"] = toml_edit::value(v as i64); }
-
-    if let Some(ref overrides) = routing.task_overrides {
-        let mut overrides_table = toml_edit::InlineTable::new();
-        for (k, v) in overrides {
-            overrides_table.insert(k.as_str(), v.as_str().into());
-        }
-        table["task_overrides"] = toml_edit::value(overrides_table);
-    }
-
-    if let Some(ref fallbacks) = routing.fallbacks {
-        let mut fallbacks_table = toml_edit::Table::new();
-        for (model, chain) in fallbacks {
-            let mut arr = toml_edit::Array::new();
-            for m in chain {
-                arr.push(m.as_str());
-            }
-            fallbacks_table[model.as_str()] = toml_edit::value(arr);
-        }
-        table["fallbacks"] = toml_edit::Item::Table(fallbacks_table);
-    }
-
     Ok(())
 }
 
@@ -2306,91 +2480,6 @@ async fn cancel_process(
     }
 }
 
-// -- Worker runs --
-
-#[derive(Deserialize)]
-struct WorkerRunsQuery {
-    agent_id: String,
-    #[serde(default = "default_worker_runs_limit")]
-    limit: i64,
-    #[serde(default)]
-    offset: i64,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-fn default_worker_runs_limit() -> i64 { 50 }
-
-#[derive(Serialize)]
-struct WorkerRunInfo {
-    id: String,
-    channel_id: Option<String>,
-    task: String,
-    result: Option<String>,
-    status: String,
-    started_at: String,
-    completed_at: Option<String>,
-}
-
-#[derive(Serialize)]
-struct WorkerRunsResponse {
-    runs: Vec<WorkerRunInfo>,
-    total: i64,
-}
-
-async fn list_worker_runs(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<WorkerRunsQuery>,
-) -> Result<Json<WorkerRunsResponse>, StatusCode> {
-    let pools = state.agent_pools.load();
-    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let status_filter = query.status.as_deref().unwrap_or("");
-    let has_status_filter = !status_filter.is_empty();
-
-    let total: i64 = if has_status_filter {
-        sqlx::query_scalar("SELECT COUNT(*) FROM worker_runs WHERE status = ?")
-            .bind(status_filter)
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0)
-    } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM worker_runs")
-            .fetch_one(pool)
-            .await
-            .unwrap_or(0)
-    };
-
-    let rows = if has_status_filter {
-        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
-            "SELECT id, channel_id, task, result, status, started_at, completed_at \
-             FROM worker_runs WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3"
-        )
-        .bind(status_filter)
-        .bind(query.limit)
-        .bind(query.offset)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-    } else {
-        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
-            "SELECT id, channel_id, task, result, status, started_at, completed_at \
-             FROM worker_runs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2"
-        )
-        .bind(query.limit)
-        .bind(query.offset)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
-    };
-
-    let runs = rows.into_iter().map(|(id, channel_id, task, result, status, started_at, completed_at)| {
-        WorkerRunInfo { id, channel_id, task, result, status, started_at, completed_at }
-    }).collect();
-
-    Ok(Json(WorkerRunsResponse { runs, total }))
-}
-
 // -- Provider management --
 
 #[derive(Serialize)]
@@ -2406,7 +2495,6 @@ struct ProviderStatus {
     xai: bool,
     mistral: bool,
     opencode_zen: bool,
-    zhipu_sub: bool,
 }
 
 #[derive(Serialize)]
@@ -2433,7 +2521,7 @@ async fn get_providers(
     let config_path = state.config_path.read().await.clone();
 
     // Check which providers have keys by reading the config
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen, zhipu_sub) = if config_path.exists() {
+    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2470,7 +2558,6 @@ async fn get_providers(
             has_key("xai_key", "XAI_API_KEY"),
             has_key("mistral_key", "MISTRAL_API_KEY"),
             has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
-            has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
         )
     } else {
         // No config file — check env vars only
@@ -2486,7 +2573,6 @@ async fn get_providers(
             std::env::var("XAI_API_KEY").is_ok(),
             std::env::var("MISTRAL_API_KEY").is_ok(),
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
-            std::env::var("ZHIPU_SUB_API_KEY").is_ok(),
         )
     };
 
@@ -2502,12 +2588,10 @@ async fn get_providers(
         xai,
         mistral,
         opencode_zen,
-        zhipu_sub,
     };
-
-    let has_any = providers.anthropic
-        || providers.openai
-        || providers.openrouter
+    let has_any = providers.anthropic 
+        || providers.openai 
+        || providers.openrouter 
         || providers.zhipu
         || providers.groq
         || providers.together
@@ -2515,8 +2599,7 @@ async fn get_providers(
         || providers.deepseek
         || providers.xai
         || providers.mistral
-        || providers.opencode_zen
-        || providers.zhipu_sub;
+        || providers.opencode_zen;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -2537,7 +2620,6 @@ async fn update_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
-        "zhipu-sub" => "zhipu_sub_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -2590,38 +2672,31 @@ async fn update_provider(
         let current_provider =
             crate::llm::routing::provider_from_model(current_channel);
 
-        // Check if the current routing provider has a key configured
+        // Check if the current routing provider has a usable key.
+        // Resolves "env:VAR_NAME" references — the boot script writes these
+        // for common providers even when the env var isn't actually set.
+        let has_provider_key = |toml_key: &str, env_var: &str| -> bool {
+            if let Some(s) = doc.get("llm").and_then(|l| l.get(toml_key)).and_then(|v| v.as_str()) {
+                if let Some(var_name) = s.strip_prefix("env:") {
+                    return std::env::var(var_name).is_ok();
+                }
+                return !s.is_empty();
+            }
+            std::env::var(env_var).is_ok()
+        };
+
         let has_key_for_current = match current_provider {
-            "anthropic" => doc
-                .get("llm")
-                .and_then(|l| l.get("anthropic_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
-            "openai" => doc
-                .get("llm")
-                .and_then(|l| l.get("openai_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
-            "openrouter" => doc
-                .get("llm")
-                .and_then(|l| l.get("openrouter_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
-            "zhipu" => doc
-                .get("llm")
-                .and_then(|l| l.get("zhipu_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
-            "opencode-zen" => doc
-                .get("llm")
-                .and_then(|l| l.get("opencode_zen_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
-            "zhipu-sub" => doc
-                .get("llm")
-                .and_then(|l| l.get("zhipu_sub_key"))
-                .and_then(|v| v.as_str())
-                .is_some_and(|s| !s.is_empty()),
+            "anthropic" => has_provider_key("anthropic_key", "ANTHROPIC_API_KEY"),
+            "openai" => has_provider_key("openai_key", "OPENAI_API_KEY"),
+            "openrouter" => has_provider_key("openrouter_key", "OPENROUTER_API_KEY"),
+            "zhipu" => has_provider_key("zhipu_key", "ZHIPU_API_KEY"),
+            "groq" => has_provider_key("groq_key", "GROQ_API_KEY"),
+            "together" => has_provider_key("together_key", "TOGETHER_API_KEY"),
+            "fireworks" => has_provider_key("fireworks_key", "FIREWORKS_API_KEY"),
+            "deepseek" => has_provider_key("deepseek_key", "DEEPSEEK_API_KEY"),
+            "xai" => has_provider_key("xai_key", "XAI_API_KEY"),
+            "mistral" => has_provider_key("mistral_key", "MISTRAL_API_KEY"),
+            "opencode-zen" => has_provider_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
             _ => false,
         };
 
@@ -2696,7 +2771,6 @@ async fn delete_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
-        "zhipu-sub" => "zhipu_sub_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -2764,13 +2838,6 @@ fn curated_models() -> Vec<ModelInfo> {
     vec![
         // Anthropic (direct)
         ModelInfo {
-            id: "anthropic/claude-opus-4-20250514".into(),
-            name: "Claude Opus 4".into(),
-            provider: "anthropic".into(),
-            context_window: Some(200_000),
-            curated: true,
-        },
-        ModelInfo {
             id: "anthropic/claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
             provider: "anthropic".into(),
@@ -2778,41 +2845,20 @@ fn curated_models() -> Vec<ModelInfo> {
             curated: true,
         },
         ModelInfo {
-            id: "anthropic/claude-sonnet-4-5-20250929".into(),
-            name: "Claude Sonnet 4.5".into(),
-            provider: "anthropic".into(),
-            context_window: Some(200_000),
-            curated: true,
-        },
-        ModelInfo {
-            id: "anthropic/claude-haiku-4-5-20251001".into(),
+            id: "anthropic/claude-haiku-4.5-20250514".into(),
             name: "Claude Haiku 4.5".into(),
             provider: "anthropic".into(),
             context_window: Some(200_000),
             curated: true,
         },
         ModelInfo {
-            id: "anthropic/claude-3-5-sonnet-20241022".into(),
-            name: "Claude 3.5 Sonnet".into(),
-            provider: "anthropic".into(),
-            context_window: Some(200_000),
-            curated: true,
-        },
-        ModelInfo {
-            id: "anthropic/claude-3-5-haiku-20241022".into(),
-            name: "Claude 3.5 Haiku".into(),
+            id: "anthropic/claude-opus-4-20250514".into(),
+            name: "Claude Opus 4".into(),
             provider: "anthropic".into(),
             context_window: Some(200_000),
             curated: true,
         },
         // OpenRouter
-        ModelInfo {
-            id: "openrouter/anthropic/claude-opus-4-20250514".into(),
-            name: "Claude Opus 4".into(),
-            provider: "openrouter".into(),
-            context_window: Some(200_000),
-            curated: true,
-        },
         ModelInfo {
             id: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
             name: "Claude Sonnet 4".into(),
@@ -2821,15 +2867,15 @@ fn curated_models() -> Vec<ModelInfo> {
             curated: true,
         },
         ModelInfo {
-            id: "openrouter/anthropic/claude-sonnet-4-5-20250929".into(),
-            name: "Claude Sonnet 4.5".into(),
+            id: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+            name: "Claude Haiku 4.5".into(),
             provider: "openrouter".into(),
             context_window: Some(200_000),
             curated: true,
         },
         ModelInfo {
-            id: "openrouter/anthropic/claude-haiku-4-5-20251001".into(),
-            name: "Claude Haiku 4.5".into(),
+            id: "openrouter/anthropic/claude-opus-4-20250514".into(),
+            name: "Claude Opus 4".into(),
             provider: "openrouter".into(),
             context_window: Some(200_000),
             curated: true,
@@ -2947,24 +2993,24 @@ fn curated_models() -> Vec<ModelInfo> {
             context_window: Some(200_000),
             curated: true,
         },
-        // Z.ai (GLM) - Current models
+        // Z.ai (GLM)
         ModelInfo {
-            id: "zhipu/glm-5".into(),
-            name: "GLM-5".into(),
+            id: "zhipu/glm-4-plus".into(),
+            name: "GLM-4 Plus".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
         },
         ModelInfo {
-            id: "zhipu/glm-4.7".into(),
-            name: "GLM-4.7".into(),
+            id: "zhipu/glm-4-flash".into(),
+            name: "GLM-4 Flash".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
         },
         ModelInfo {
-            id: "zhipu/glm-4.6".into(),
-            name: "GLM-4.6".into(),
+            id: "zhipu/glm-4-flashx".into(),
+            name: "GLM-4 FlashX".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
             curated: true,
@@ -3200,28 +3246,6 @@ fn curated_models() -> Vec<ModelInfo> {
             context_window: None,
             curated: true,
         },
-        // Z.ai Subscription
-        ModelInfo {
-            id: "zhipu-sub/glm-5".into(),
-            name: "GLM-5".into(),
-            provider: "zhipu-sub".into(),
-            context_window: Some(128_000),
-            curated: true,
-        },
-        ModelInfo {
-            id: "zhipu-sub/glm-4.7".into(),
-            name: "GLM-4.7".into(),
-            provider: "zhipu-sub".into(),
-            context_window: Some(128_000),
-            curated: true,
-        },
-        ModelInfo {
-            id: "zhipu-sub/glm-4.6".into(),
-            name: "GLM-4.6".into(),
-            provider: "zhipu-sub".into(),
-            context_window: Some(128_000),
-            curated: true,
-        },
     ]
 }
 
@@ -3348,9 +3372,6 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
     }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
-    }
-    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") {
-        providers.push("zhipu-sub");
     }
 
     providers
@@ -4854,21 +4875,6 @@ struct GlobalSettingsResponse {
     api_bind: String,
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
-    cli_workers: CliWorkersSettingsResponse,
-}
-
-#[derive(Serialize)]
-struct CliWorkersSettingsResponse {
-    enabled: bool,
-    backends: std::collections::HashMap<String, CliBackendSettingsResponse>,
-}
-
-#[derive(Serialize)]
-struct CliBackendSettingsResponse {
-    command: String,
-    args: Vec<String>,
-    description: String,
-    timeout_secs: u64,
 }
 
 #[derive(Serialize)]
@@ -4896,21 +4902,6 @@ struct GlobalSettingsUpdate {
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
-    cli_workers: Option<CliWorkersSettingsUpdate>,
-}
-
-#[derive(Deserialize)]
-struct CliWorkersSettingsUpdate {
-    enabled: Option<bool>,
-    backends: Option<std::collections::HashMap<String, CliBackendSettingsUpdate>>,
-}
-
-#[derive(Deserialize)]
-struct CliBackendSettingsUpdate {
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    description: Option<String>,
-    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -4942,7 +4933,7 @@ async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, cli_workers) = if config_path.exists() {
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -5036,43 +5027,7 @@ async fn get_global_settings(
             },
         };
 
-        // Parse CLI workers config
-        let cli_table = doc.get("defaults").and_then(|d| d.get("cli_workers"));
-        let cli_backends_table = cli_table.and_then(|c| c.get("backends"));
-        let mut cli_backends = std::collections::HashMap::new();
-        if let Some(backends) = cli_backends_table.and_then(|b| b.as_table()) {
-            for (name, value) in backends.iter() {
-                if let Some(backend_table) = value.as_table() {
-                    cli_backends.insert(name.to_string(), CliBackendSettingsResponse {
-                        command: backend_table.get("command")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        args: backend_table.get("args")
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-                            .unwrap_or_default(),
-                        description: backend_table.get("description")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        timeout_secs: backend_table.get("timeout_secs")
-                            .and_then(|v| v.as_integer())
-                            .and_then(|i| u64::try_from(i).ok())
-                            .unwrap_or(600),
-                    });
-                }
-            }
-        }
-        let cli_workers = CliWorkersSettingsResponse {
-            enabled: cli_table
-                .and_then(|c| c.get("enabled"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            backends: cli_backends,
-        };
-
-        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode, cli_workers)
+        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode)
     } else {
         (None, true, 19898, "127.0.0.1".to_string(), "errors_only".to_string(), OpenCodeSettingsResponse {
             enabled: false,
@@ -5085,9 +5040,6 @@ async fn get_global_settings(
                 bash: "allow".to_string(),
                 webfetch: "allow".to_string(),
             },
-        }, CliWorkersSettingsResponse {
-            enabled: false,
-            backends: std::collections::HashMap::new(),
         })
     };
     
@@ -5098,7 +5050,6 @@ async fn get_global_settings(
         api_bind,
         worker_log_mode,
         opencode,
-        cli_workers,
     }))
 }
 
@@ -5208,46 +5159,6 @@ async fn update_global_settings(
             }
             if let Some(webfetch) = permissions.webfetch {
                 doc["defaults"]["opencode"]["permissions"]["webfetch"] = toml_edit::value(webfetch);
-            }
-        }
-    }
-
-    // Update CLI workers settings
-    if let Some(cli_workers) = request.cli_workers {
-        if doc.get("defaults").is_none() {
-            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        if doc["defaults"].get("cli_workers").is_none() {
-            doc["defaults"]["cli_workers"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-
-        if let Some(enabled) = cli_workers.enabled {
-            doc["defaults"]["cli_workers"]["enabled"] = toml_edit::value(enabled);
-        }
-        if let Some(backends) = cli_workers.backends {
-            if doc["defaults"]["cli_workers"].get("backends").is_none() {
-                doc["defaults"]["cli_workers"]["backends"] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            for (name, backend) in backends {
-                if doc["defaults"]["cli_workers"]["backends"].get(&name).is_none() {
-                    doc["defaults"]["cli_workers"]["backends"][&name] = toml_edit::Item::Table(toml_edit::Table::new());
-                }
-                if let Some(command) = backend.command {
-                    doc["defaults"]["cli_workers"]["backends"][&name]["command"] = toml_edit::value(command);
-                }
-                if let Some(args) = backend.args {
-                    let mut arr = toml_edit::Array::new();
-                    for arg in args {
-                        arr.push(arg);
-                    }
-                    doc["defaults"]["cli_workers"]["backends"][&name]["args"] = toml_edit::value(arr);
-                }
-                if let Some(description) = backend.description {
-                    doc["defaults"]["cli_workers"]["backends"][&name]["description"] = toml_edit::value(description);
-                }
-                if let Some(timeout) = backend.timeout_secs {
-                    doc["defaults"]["cli_workers"]["backends"][&name]["timeout_secs"] = toml_edit::value(timeout as i64);
-                }
             }
         }
     }
