@@ -68,19 +68,30 @@ export function useCortexChat(
 	// Accumulate artifact content across delta events
 	const pendingArtifactRef = useRef<ArtifactPayload | null>(null);
 
-	// Load latest thread on mount
+	// Load thread on mount — scoped to channel when one is provided
 	useEffect(() => {
 		if (loadedRef.current) return;
 		loadedRef.current = true;
 
-		api.cortexChatMessages(agentId).then((data) => {
-			setThreadId(data.thread_id);
-			setMessages(data.messages);
-		}).catch((error) => {
-			console.warn("Failed to load cortex chat history:", error);
-			setThreadId(generateThreadId());
-		});
-	}, [agentId]);
+		if (channelId) {
+			// Each channel gets its own persistent cortex thread
+			const tid = `channel:${channelId}`;
+			setThreadId(tid);
+			api.cortexChatMessages(agentId, tid).then((data) => {
+				setMessages(data.messages);
+			}).catch(() => {
+				// Fresh thread — no history yet for this channel
+			});
+		} else {
+			api.cortexChatMessages(agentId).then((data) => {
+				setThreadId(data.thread_id);
+				setMessages(data.messages);
+			}).catch((error) => {
+				console.warn("Failed to load cortex chat history:", error);
+				setThreadId(generateThreadId());
+			});
+		}
+	}, [agentId, channelId]);
 
 	const sendMessage = useCallback(async (text: string) => {
 		if (isStreaming || !threadId) return;

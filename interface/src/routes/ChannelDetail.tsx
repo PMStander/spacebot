@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
 import type { ChannelLiveState, ActiveWorker, ActiveBranch } from "@/hooks/useChannelLiveState";
@@ -14,7 +15,7 @@ import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 import { Button } from "@/ui";
-import { Cancel01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, Delete01Icon, IdeaIcon, PencilEdit01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 interface ChannelDetailProps {
@@ -333,6 +334,8 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 }
 
 export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMore }: ChannelDetailProps) {
+	const navigate = useNavigate();
+	const queryClient = useQueryClient();
 	const timeline = liveState?.timeline ?? [];
 	const hasMore = liveState?.hasMore ?? false;
 	const loadingMore = liveState?.loadingMore ?? false;
@@ -342,9 +345,44 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const activeWorkerCount = Object.keys(workers).length;
 	const activeBranchCount = Object.keys(branches).length;
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
+	const isInternal = channel?.platform === "internal";
 	type PanelKind = "closed" | "cortex" | "artifact";
 	const [panelKind, setPanelKind] = useState<PanelKind>("cortex");
 	const { artifact, clearArtifact } = useArtifactStore();
+
+	// Rename state
+	const [editingName, setEditingName] = useState(false);
+	const [nameInput, setNameInput] = useState("");
+
+	// Delete confirmation state
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const [deleting, setDeleting] = useState(false);
+
+	const handleRename = useCallback(async () => {
+		const trimmed = nameInput.trim();
+		if (!trimmed || !isInternal) { setEditingName(false); return; }
+		try {
+			await api.renameChannel(agentId, channelId, trimmed);
+			await queryClient.invalidateQueries({ queryKey: ["channels"] });
+		} catch (error) {
+			console.warn("Failed to rename channel:", error);
+		} finally {
+			setEditingName(false);
+		}
+	}, [agentId, channelId, nameInput, isInternal, queryClient]);
+
+	const handleDelete = useCallback(async () => {
+		setDeleting(true);
+		try {
+			await api.deleteChannel(agentId, channelId);
+			await queryClient.invalidateQueries({ queryKey: ["channels"] });
+			navigate({ to: "/agents/$agentId/channels", params: { agentId } });
+		} catch (error) {
+			console.warn("Failed to delete channel:", error);
+			setDeleting(false);
+			setConfirmDelete(false);
+		}
+	}, [agentId, channelId, queryClient, navigate]);
 
 	// Open an artifact in the split-screen panel (from timeline clicks or cortex chat)
 	const openArtifact = useCallback((art: UIArtifact) => {
@@ -431,63 +469,115 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 			<div className="flex flex-1 flex-col overflow-hidden">
 				{/* Channel sub-header */}
 				<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
-					<Link
-						to="/agents/$agentId/channels"
-						params={{ agentId }}
-						className="text-tiny text-ink-faint hover:text-ink-dull"
-					>
-						Channels
-					</Link>
-					<span className="text-ink-faint/50">/</span>
-					<span className="text-sm font-medium text-ink">
-						{channel?.display_name ?? channelId}
-					</span>
-					{channel && (
-						<span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-tiny font-medium ${platformColor(channel.platform)}`}>
-							{platformIcon(channel.platform)}
-						</span>
-					)}
+					{confirmDelete ? (
+						<>
+							<span className="flex-1 text-sm text-ink-dull">
+								Delete <span className="font-medium text-ink">{channel?.display_name ?? "this chat"}</span>? Messages removed — memories preserved.
+							</span>
+							<Button onClick={() => setConfirmDelete(false)} variant="ghost" size="sm" disabled={deleting}>Cancel</Button>
+							<Button onClick={handleDelete} size="sm" disabled={deleting} className="bg-red-500/20 text-red-400 hover:bg-red-500/30">
+								{deleting ? "Deleting…" : "Delete"}
+							</Button>
+						</>
+					) : (
+						<>
+							<Link
+								to="/agents/$agentId/channels"
+								params={{ agentId }}
+								className="text-tiny text-ink-faint hover:text-ink-dull"
+							>
+								Channels
+							</Link>
+							<span className="text-ink-faint/50">/</span>
+							{isInternal && editingName ? (
+								<input
+									autoFocus
+									value={nameInput}
+									onChange={(e) => setNameInput(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleRename();
+										if (e.key === "Escape") setEditingName(false);
+									}}
+									onBlur={handleRename}
+									className="rounded border border-violet-500/40 bg-app-darkBox px-2 py-0.5 text-sm font-medium text-ink focus:outline-none"
+								/>
+							) : (
+								<span
+									className={`text-sm font-medium text-ink ${isInternal ? "cursor-pointer hover:text-ink-dull" : ""}`}
+									onClick={isInternal ? () => { setNameInput(channel?.display_name ?? ""); setEditingName(true); } : undefined}
+									title={isInternal ? "Click to rename" : undefined}
+								>
+									{channel?.display_name ?? channelId}
+								</span>
+							)}
+							{isInternal && !editingName && (
+								<button
+									onClick={() => { setNameInput(channel?.display_name ?? ""); setEditingName(true); }}
+									className="text-ink-faint/30 hover:text-ink-faint"
+									title="Rename"
+								>
+									<HugeiconsIcon icon={PencilEdit01Icon} className="h-3 w-3" />
+								</button>
+							)}
+							{channel && !isInternal && (
+								<span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-tiny font-medium ${platformColor(channel.platform)}`}>
+									{platformIcon(channel.platform)}
+								</span>
+							)}
 
-					{/* Right side: activity indicators + typing + cortex toggle */}
-					<div className="ml-auto flex items-center gap-3">
-						{hasActivity && (
-							<div className="flex items-center gap-2">
-								{activeWorkerCount > 0 && (
-									<div className="flex items-center gap-1.5">
-										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-										<span className="text-tiny text-amber-300">
-											{activeWorkerCount} worker{activeWorkerCount !== 1 ? "s" : ""}
-										</span>
+							{/* Right side: activity indicators + typing + delete + cortex toggle */}
+							<div className="ml-auto flex items-center gap-3">
+								{hasActivity && (
+									<div className="flex items-center gap-2">
+										{activeWorkerCount > 0 && (
+											<div className="flex items-center gap-1.5">
+												<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+												<span className="text-tiny text-amber-300">
+													{activeWorkerCount} worker{activeWorkerCount !== 1 ? "s" : ""}
+												</span>
+											</div>
+										)}
+										{activeBranchCount > 0 && (
+											<div className="flex items-center gap-1.5">
+												<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+												<span className="text-tiny text-violet-300">
+													{activeBranchCount} branch{activeBranchCount !== 1 ? "es" : ""}
+												</span>
+											</div>
+										)}
 									</div>
 								)}
-								{activeBranchCount > 0 && (
-									<div className="flex items-center gap-1.5">
-										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-										<span className="text-tiny text-violet-300">
-											{activeBranchCount} branch{activeBranchCount !== 1 ? "es" : ""}
-										</span>
+								{isTyping && (
+									<div className="flex items-center gap-1">
+										<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+										<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.2s]" />
+										<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.4s]" />
+										<span className="ml-1 text-tiny text-ink-faint">typing</span>
 									</div>
 								)}
+								{isInternal && (
+									<Button
+										onClick={() => setConfirmDelete(true)}
+										variant="ghost"
+										size="icon"
+										className="h-8 w-8 text-ink-faint/40 hover:bg-red-500/10 hover:text-red-400"
+										title="Delete channel"
+									>
+										<HugeiconsIcon icon={Delete01Icon} className="h-4 w-4" />
+									</Button>
+								)}
+								<Button
+									onClick={() => setPanelKind(panelKind === "cortex" ? "closed" : "cortex")}
+									variant={panelKind === "cortex" ? "secondary" : "ghost"}
+									size="icon"
+									className={`h-8 w-8 ${panelKind === "cortex" ? "bg-violet-500/20 text-violet-400" : ""}`}
+									title="Toggle cortex chat"
+								>
+									<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
+								</Button>
 							</div>
-						)}
-						{isTyping && (
-							<div className="flex items-center gap-1">
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.2s]" />
-								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.4s]" />
-								<span className="ml-1 text-tiny text-ink-faint">typing</span>
-							</div>
-						)}
-					<Button
-						onClick={() => setPanelKind(panelKind === "cortex" ? "closed" : "cortex")}
-						variant={panelKind === "cortex" ? "secondary" : "ghost"}
-						size="icon"
-						className={`h-8 w-8 ${panelKind === "cortex" ? "bg-violet-500/20 text-violet-400" : ""}`}
-						title="Toggle cortex chat"
-					>
-						<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
-					</Button>
-					</div>
+						</>
+					)}
 				</div>
 
 				{/* Timeline — flex-col-reverse keeps scroll pinned to bottom */}

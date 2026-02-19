@@ -11,6 +11,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
+pub(super) struct RenameChannelRequest {
+    agent_id: String,
+    channel_id: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct DeleteChannelQuery {
+    agent_id: String,
+    channel_id: String,
+}
+
+#[derive(Deserialize)]
 pub(super) struct CreateChannelRequest {
     agent_id: String,
     display_name: Option<String>,
@@ -180,6 +193,75 @@ pub(super) async fn create_internal_channel(
         display_name,
         agent_id: request.agent_id,
     }))
+}
+
+/// Rename an internal channel.
+pub(super) async fn rename_channel(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<RenameChannelRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+
+    let rows_affected = sqlx::query(
+        "UPDATE channels SET display_name = ? WHERE id = ? AND platform = 'internal'"
+    )
+    .bind(&request.display_name)
+    .bind(&request.channel_id)
+    .execute(&pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, channel_id = %request.channel_id, "failed to rename channel");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Delete an internal channel and all its messages.
+/// Agent memories derived from the channel are preserved.
+pub(super) async fn delete_channel(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<DeleteChannelQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+
+    // Verify it exists and is internal before deleting
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND platform = 'internal')"
+    )
+    .bind(&query.channel_id)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !exists {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Delete all channel-scoped data; memories are agent-scoped and preserved
+    sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
+        .bind(&query.channel_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM branch_runs WHERE channel_id = ?")
+        .bind(&query.channel_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM worker_runs WHERE channel_id = ?")
+        .bind(&query.channel_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM artifacts WHERE channel_id = ?")
+        .bind(&query.channel_id).execute(&pool).await.ok();
+    sqlx::query("DELETE FROM channels WHERE id = ?")
+        .bind(&query.channel_id).execute(&pool).await
+        .map_err(|error| {
+            tracing::warn!(%error, channel_id = %query.channel_id, "failed to delete channel");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Cancel a running worker or branch via the API.
