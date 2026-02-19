@@ -9,7 +9,8 @@ use rig::completion::{
     self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
 };
 use rig::message::{
-    AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction, UserContent,
+    AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
+    ToolResult, UserContent,
 };
 use rig::one_or_many::OneOrMany;
 use rig::streaming::StreamingCompletionResponse;
@@ -75,8 +76,9 @@ impl SpacebotModel {
             "deepseek" => self.call_deepseek(request).await,
             "xai" => self.call_xai(request).await,
             "mistral" => self.call_mistral(request).await,
+            "ollama" => self.call_ollama(request).await,
             "opencode-zen" => self.call_opencode_zen(request).await,
-            "zhipu-sub" => self.call_zhipu_sub(request).await,
+            "nvidia" => self.call_nvidia(request).await,
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
             ))),
@@ -179,6 +181,10 @@ impl CompletionModel for SpacebotModel {
         &self,
         request: CompletionRequest,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        #[cfg(feature = "metrics")]
+        let start = std::time::Instant::now();
+
+        let result = async move {
         let Some(routing) = &self.routing else {
             // No routing config — just call the model directly, no fallback/retry
             return self.attempt_completion(request).await;
@@ -258,6 +264,27 @@ impl CompletionModel for SpacebotModel {
         Err(last_error.unwrap_or_else(|| {
             CompletionError::ProviderError("all models in fallback chain failed".into())
         }))
+        }
+        .await;
+
+        #[cfg(feature = "metrics")]
+        {
+            let elapsed = start.elapsed().as_secs_f64();
+            let metrics = crate::telemetry::Metrics::global();
+            // TODO: agent_id and tier are "unknown" because SpacebotModel doesn't
+            // carry process context. Thread agent_id/ProcessType through to get
+            // per-agent, per-tier breakdowns.
+            metrics
+                .llm_requests_total
+                .with_label_values(&["unknown", &self.full_model_name, "unknown"])
+                .inc();
+            metrics
+                .llm_request_duration_seconds
+                .with_label_values(&["unknown", &self.full_model_name, "unknown"])
+                .observe(elapsed);
+        }
+
+        result
     }
 
     async fn stream(
@@ -523,28 +550,9 @@ impl SpacebotModel {
         &self,
         request: CompletionRequest,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(request, "zhipu", "Z.ai", "https://api.z.ai/api/paas/v4/chat/completions").await
-    }
-
-    async fn call_zhipu_sub(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(request, "zhipu-sub", "Z.ai Subscription", "https://api.z.ai/api/coding/paas/v4/chat/completions").await
-    }
-
-    /// Generic OpenAI-compatible API call.
-    /// Used by providers that implement the OpenAI chat completions format.
-    async fn call_openai_compatible(
-        &self,
-        request: CompletionRequest,
-        provider_id: &str,
-        provider_display_name: &str,
-        endpoint: &str,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let api_key = self
             .llm_manager
-            .get_api_key(provider_id)
+            .get_api_key("zhipu")
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let mut messages = Vec::new();
@@ -592,8 +600,119 @@ impl SpacebotModel {
         let response = self
             .llm_manager
             .http_client()
-            .post(endpoint)
+            .post("https://api.z.ai/api/paas/v4/chat/completions")
             .header("authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+
+        let response_body: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| CompletionError::ProviderError(format!(
+                "Z.ai response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
+            )))?;
+
+        if !status.is_success() {
+            let message = response_body["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            return Err(CompletionError::ProviderError(format!(
+                "Z.ai API error ({status}): {message}"
+            )));
+        }
+
+        parse_openai_response(response_body, "Z.ai")
+    }
+
+    /// Generic OpenAI-compatible API call.
+    /// Used by providers that implement the OpenAI chat completions format.
+    async fn call_openai_compatible(
+        &self,
+        request: CompletionRequest,
+        provider_id: &str,
+        provider_display_name: &str,
+        endpoint: &str,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let api_key = self
+            .llm_manager
+            .get_api_key(provider_id)
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+        self.call_openai_compatible_with_optional_auth(
+            request,
+            provider_display_name,
+            endpoint,
+            Some(api_key),
+        ).await
+    }
+
+    /// Generic OpenAI-compatible API call with optional bearer auth.
+    async fn call_openai_compatible_with_optional_auth(
+        &self,
+        request: CompletionRequest,
+        provider_display_name: &str,
+        endpoint: &str,
+        api_key: Option<String>,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+
+        let mut messages = Vec::new();
+
+        if let Some(preamble) = &request.preamble {
+            messages.push(serde_json::json!({
+                "role": "system",
+                "content": preamble,
+            }));
+        }
+
+        messages.extend(convert_messages_to_openai(&request.chat_history));
+
+        let mut body = serde_json::json!({
+            "model": self.model_name,
+            "messages": messages,
+        });
+
+        if let Some(max_tokens) = request.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        let response = self
+            .llm_manager
+            .http_client()
+            .post(endpoint);
+        let response = if let Some(api_key) = api_key {
+            response.header("authorization", format!("Bearer {api_key}"))
+        } else {
+            response
+        };
+        let response = response
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -695,6 +814,22 @@ impl SpacebotModel {
         ).await
     }
 
+    async fn call_ollama(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let base_url = normalize_ollama_base_url(self.llm_manager.ollama_base_url());
+        let endpoint = format!("{base_url}/v1/chat/completions");
+        let api_key = self.llm_manager.get_api_key("ollama").ok();
+
+        self.call_openai_compatible_with_optional_auth(
+            request,
+            "Ollama",
+            &endpoint,
+            api_key,
+        ).await
+    }
+
     async fn call_opencode_zen(
         &self,
         request: CompletionRequest,
@@ -706,9 +841,37 @@ impl SpacebotModel {
             "https://opencode.ai/zen/v1/chat/completions",
         ).await
     }
+
+    async fn call_nvidia(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_openai_compatible(
+            request,
+            "nvidia",
+            "NVIDIA NIM",
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+        ).await
+    }
 }
 
 // --- Helpers ---
+
+fn normalize_ollama_base_url(configured: Option<String>) -> String {
+    let mut base_url = configured
+        .unwrap_or_else(|| "http://localhost:11434".to_string())
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+
+    if base_url.ends_with("/api") {
+        base_url.truncate(base_url.len() - "/api".len());
+    } else if base_url.ends_with("/v1") {
+        base_url.truncate(base_url.len() - "/v1".len());
+    }
+
+    base_url
+}
 
 fn tool_result_content_to_string(content: &OneOrMany<rig::message::ToolResultContent>) -> String {
     content
@@ -1001,22 +1164,47 @@ fn parse_openai_response(
         }
     }
 
+    // Some reasoning models (e.g., NVIDIA kimi-k2.5) return reasoning in a separate field
+    if assistant_content.is_empty() {
+        if let Some(reasoning) = choice["reasoning_content"].as_str() {
+            if !reasoning.is_empty() {
+                tracing::debug!(
+                    provider = %provider_label,
+                    "extracted reasoning_content as main content"
+                );
+                assistant_content.push(AssistantContent::Text(Text {
+                    text: reasoning.to_string(),
+                }));
+            }
+        }
+    }
+
     if let Some(tool_calls) = choice["tool_calls"].as_array() {
         for tc in tool_calls {
             let id = tc["id"].as_str().unwrap_or("").to_string();
             let name = tc["function"]["name"].as_str().unwrap_or("").to_string();
-            // OpenAI returns arguments as a JSON string, parse it back to Value
-            let arguments = tc["function"]["arguments"]
+            // OpenAI-compatible APIs usually return arguments as a JSON string.
+            // Some providers return it as a raw JSON object instead.
+            let arguments_field = &tc["function"]["arguments"];
+            let arguments = arguments_field
                 .as_str()
-                .and_then(|s| serde_json::from_str(s).ok())
+                .and_then(|raw| serde_json::from_str(raw).ok())
+                .or_else(|| arguments_field.as_object().map(|_| arguments_field.clone()))
                 .unwrap_or(serde_json::json!({}));
             assistant_content
                 .push(AssistantContent::ToolCall(make_tool_call(id, name, arguments)));
         }
     }
 
-    let result_choice = OneOrMany::many(assistant_content)
-        .map_err(|_| CompletionError::ResponseError(format!("empty response from {provider_label}")))?;
+    let result_choice = OneOrMany::many(assistant_content.clone())
+        .map_err(|_| {
+            tracing::warn!(
+                provider = %provider_label,
+                choice = ?choice,
+                "empty response from provider"
+            );
+            CompletionError::ResponseError(format!("empty response from {provider_label}"))
+        })?;
 
     let input_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);

@@ -45,6 +45,8 @@ pub struct Config {
     pub bindings: Vec<Binding>,
     /// HTTP API server configuration.
     pub api: ApiConfig,
+    /// Prometheus metrics endpoint configuration.
+    pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
 }
@@ -70,6 +72,27 @@ impl Default for ApiConfig {
     }
 }
 
+/// Prometheus metrics endpoint configuration.
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
+    /// Whether the metrics endpoint is enabled.
+    pub enabled: bool,
+    /// Port to bind the metrics HTTP server on.
+    pub port: u16,
+    /// Address to bind the metrics HTTP server on.
+    pub bind: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 9090,
+            bind: "0.0.0.0".into(),
+        }
+    }
+}
+
 /// LLM provider credentials (instance-level).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
@@ -83,12 +106,14 @@ pub struct LlmConfig {
     pub deepseek_key: Option<String>,
     pub xai_key: Option<String>,
     pub mistral_key: Option<String>,
+    pub ollama_key: Option<String>,
+    pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
-    pub zhipu_sub_key: Option<String>,
+    pub nvidia_key: Option<String>,
 }
 
 impl LlmConfig {
-    /// Check if any provider key is configured.
+    /// Check if any provider configuration is set.
     pub fn has_any_key(&self) -> bool {
         self.anthropic_key.is_some()
             || self.openai_key.is_some()
@@ -100,8 +125,10 @@ impl LlmConfig {
             || self.deepseek_key.is_some()
             || self.xai_key.is_some()
             || self.mistral_key.is_some()
+            || self.ollama_key.is_some()
+            || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
-            || self.zhipu_sub_key.is_some()
+            || self.nvidia_key.is_some()
     }
 }
 
@@ -125,8 +152,6 @@ pub struct DefaultsConfig {
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
-    /// CLI worker backends (Factory Droid, Claude Code CLI, etc.).
-    pub cli_workers: crate::cli_worker::CliWorkersConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
 }
@@ -410,7 +435,6 @@ impl Default for DefaultsConfig {
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
-            cli_workers: crate::cli_worker::CliWorkersConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
         }
     }
@@ -864,6 +888,8 @@ struct TomlConfig {
     #[serde(default)]
     api: TomlApiConfig,
     #[serde(default)]
+    metrics: TomlMetricsConfig,
+    #[serde(default)]
     telemetry: TomlTelemetryConfig,
 }
 
@@ -905,6 +931,33 @@ fn default_api_bind() -> String {
     "127.0.0.1".into()
 }
 
+#[derive(Deserialize)]
+struct TomlMetricsConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_metrics_port")]
+    port: u16,
+    #[serde(default = "default_metrics_bind")]
+    bind: String,
+}
+
+impl Default for TomlMetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_metrics_port(),
+            bind: default_metrics_bind(),
+        }
+    }
+}
+
+fn default_metrics_port() -> u16 {
+    9090
+}
+fn default_metrics_bind() -> String {
+    "0.0.0.0".into()
+}
+
 #[derive(Deserialize, Default)]
 struct TomlLlmConfig {
     anthropic_key: Option<String>,
@@ -917,8 +970,10 @@ struct TomlLlmConfig {
     deepseek_key: Option<String>,
     xai_key: Option<String>,
     mistral_key: Option<String>,
+    ollama_key: Option<String>,
+    ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
-    zhipu_sub_key: Option<String>,
+    nvidia_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -937,7 +992,6 @@ struct TomlDefaultsConfig {
     browser: Option<TomlBrowserConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
-    cli_workers: Option<TomlCliWorkersConfig>,
     worker_log_mode: Option<String>,
 }
 
@@ -1022,25 +1076,6 @@ struct TomlOpenCodePermissions {
     edit: Option<String>,
     bash: Option<String>,
     webfetch: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-struct TomlCliWorkersConfig {
-    enabled: Option<bool>,
-    #[serde(default)]
-    backends: HashMap<String, TomlCliBackendConfig>,
-}
-
-#[derive(Deserialize)]
-struct TomlCliBackendConfig {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1242,6 +1277,8 @@ impl Config {
         std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("OPENROUTER_API_KEY").is_err()
+            && std::env::var("OLLAMA_API_KEY").is_err()
+            && std::env::var("OLLAMA_BASE_URL").is_err()
             && std::env::var("OPENCODE_ZEN_API_KEY").is_err()
     }
 
@@ -1286,12 +1323,14 @@ impl Config {
             deepseek_key: std::env::var("DEEPSEEK_API_KEY").ok(),
             xai_key: std::env::var("XAI_API_KEY").ok(),
             mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
+            ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
+            ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
-            zhipu_sub_key: std::env::var("ZHIPU_SUB_API_KEY").ok(),
+            nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
         };
 
-        // Note: We allow boot without provider keys now. System starts in setup mode.
-        // Agents are initialized later when keys are added via API.
+        // Note: We allow boot without provider configuration now. System starts in setup mode.
+        // Agents are initialized later when providers are added via API.
 
         // Env-only routing: check for env overrides on channel/worker models
         let mut routing = RoutingConfig::default();
@@ -1330,6 +1369,7 @@ impl Config {
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api: ApiConfig::default(),
+            metrics: MetricsConfig::default(),
             telemetry: TelemetryConfig {
                 otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
                 otlp_headers: parse_otlp_headers(std::env::var("OTEL_EXPORTER_OTLP_HEADERS").ok())?,
@@ -1413,22 +1453,34 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MISTRAL_API_KEY").ok()),
+            ollama_key: toml
+                .llm
+                .ollama_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OLLAMA_API_KEY").ok()),
+            ollama_base_url: toml
+                .llm
+                .ollama_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OLLAMA_BASE_URL").ok()),
             opencode_zen_key: toml
                 .llm
                 .opencode_zen_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
-            zhipu_sub_key: toml
+            nvidia_key: toml
                 .llm
-                .zhipu_sub_key
+                .nvidia_key
                 .as_deref()
                 .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ZHIPU_SUB_API_KEY").ok()),
+                .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
         };
 
-        // Note: We allow boot without provider keys now. System starts in setup mode.
-        // Agents are initialized later when keys are added via API.
+        // Note: We allow boot without provider configuration now. System starts in setup mode.
+        // Agents are initialized later when providers are added via API.
 
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
@@ -1598,35 +1650,6 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.opencode.clone()),
-            cli_workers: toml
-                .defaults
-                .cli_workers
-                .map(|cw| {
-                    let base = &base_defaults.cli_workers;
-                    let mut backends = base.backends.clone();
-                    for (name, backend) in cw.backends {
-                        let resolved_command = resolve_env_value(&backend.command)
-                            .unwrap_or(backend.command);
-                        let mut resolved_env = HashMap::new();
-                        for (key, value) in &backend.env {
-                            if let Some(resolved) = resolve_env_value(value) {
-                                resolved_env.insert(key.clone(), resolved);
-                            }
-                        }
-                        backends.insert(name, crate::cli_worker::CliBackendConfig {
-                            command: resolved_command,
-                            args: backend.args,
-                            description: backend.description.unwrap_or_default(),
-                            env: resolved_env,
-                            timeout_secs: backend.timeout_secs.unwrap_or(600),
-                        });
-                    }
-                    crate::cli_worker::CliWorkersConfig {
-                        enabled: cw.enabled.unwrap_or(base.enabled),
-                        backends,
-                    }
-                })
-                .unwrap_or_else(|| base_defaults.cli_workers.clone()),
             worker_log_mode: toml
                 .defaults
                 .worker_log_mode
@@ -1857,6 +1880,12 @@ impl Config {
             bind: toml.api.bind,
         };
 
+        let metrics = MetricsConfig {
+            enabled: toml.metrics.enabled,
+            port: toml.metrics.port,
+            bind: toml.metrics.bind,
+        };
+
         let telemetry = {
             // env var takes precedence over config file value
             let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
@@ -1888,6 +1917,7 @@ impl Config {
             messaging,
             bindings,
             api,
+            metrics,
             telemetry,
         })
     }
@@ -1948,7 +1978,6 @@ pub struct RuntimeConfig {
     pub opencode: ArcSwap<OpenCodeConfig>,
     /// Shared pool of OpenCode server processes. Lazily initialized on first use.
     pub opencode_server_pool: Arc<crate::opencode::OpenCodeServerPool>,
-    pub cli_workers: ArcSwap<crate::cli_worker::CliWorkersConfig>,
     /// Cron store, set after agent initialization.
     pub cron_store: ArcSwap<Option<Arc<crate::cron::CronStore>>>,
     /// Cron scheduler, set after agent initialization.
@@ -1997,7 +2026,6 @@ impl RuntimeConfig {
             skills: ArcSwap::from_pointee(skills),
             opencode: ArcSwap::from_pointee(defaults.opencode.clone()),
             opencode_server_pool: Arc::new(server_pool),
-            cli_workers: ArcSwap::from_pointee(defaults.cli_workers.clone()),
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
@@ -2422,6 +2450,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "DeepSeek",
         "xAI (Grok)",
         "Mistral AI",
+        "Ollama",
         "OpenCode Zen",
     ];
     let provider_idx = Select::new()
@@ -2430,7 +2459,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         .default(0)
         .interact()?;
 
-    let (provider_key_name, toml_key, provider_id) = match provider_idx {
+    let (provider_input_name, toml_key, provider_id) = match provider_idx {
         0 => ("Anthropic API key", "anthropic_key", "anthropic"),
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
         2 => ("OpenAI API key", "openai_key", "openai"),
@@ -2441,19 +2470,35 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         7 => ("DeepSeek API key", "deepseek_key", "deepseek"),
         8 => ("xAI API key", "xai_key", "xai"),
         9 => ("Mistral AI API key", "mistral_key", "mistral"),
-        10 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        10 => ("Ollama base URL", "ollama_base_url", "ollama"),
+        11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
         _ => unreachable!(),
     };
+    let is_secret = provider_id != "ollama";
 
-    // 2. Get API key
-    let api_key: String = Password::new()
-        .with_prompt(format!("Enter your {provider_key_name}"))
-        .interact()?;
+    // 2. Get provider credential/endpoint
+    let provider_value = if is_secret {
+        let api_key: String = Password::new()
+            .with_prompt(format!("Enter your {provider_input_name}"))
+            .interact()?;
 
-    let api_key = api_key.trim().to_string();
-    if api_key.is_empty() {
-        anyhow::bail!("API key cannot be empty");
-    }
+        let api_key = api_key.trim().to_string();
+        if api_key.is_empty() {
+            anyhow::bail!("API key cannot be empty");
+        }
+        api_key
+    } else {
+        let base_url: String = Input::new()
+            .with_prompt(format!("Enter your {provider_input_name}"))
+            .default("http://localhost:11434".to_string())
+            .interact_text()?;
+
+        let base_url = base_url.trim().to_string();
+        if base_url.is_empty() {
+            anyhow::bail!("Ollama base URL cannot be empty");
+        }
+        base_url
+    };
 
     // 3. Agent name
     let agent_id: String = Input::new()
@@ -2546,7 +2591,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
 
     let mut config_content = String::new();
     config_content.push_str("[llm]\n");
-    config_content.push_str(&format!("{toml_key} = \"{api_key}\"\n"));
+    config_content.push_str(&format!("{toml_key} = \"{provider_value}\"\n"));
     config_content.push('\n');
 
     // Write routing defaults for the chosen provider

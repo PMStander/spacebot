@@ -20,6 +20,8 @@ pub mod secrets;
 pub mod settings;
 pub mod skills;
 pub mod tools;
+#[cfg(feature = "metrics")]
+pub mod telemetry;
 pub mod update;
 
 pub use error::{Error, Result};
@@ -180,6 +182,7 @@ pub struct AgentDeps {
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
+    pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
 }
 
 impl AgentDeps {
@@ -212,6 +215,9 @@ pub struct InboundMessage {
     pub content: MessageContent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub metadata: HashMap<String, serde_json::Value>,
+    /// Platform-formatted author display (e.g., "Alice (<@123>)" for Discord).
+    /// If None, channel falls back to sender_display_name from metadata.
+    pub formatted_author: Option<String>,
 }
 
 /// Message content variants.

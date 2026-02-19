@@ -192,27 +192,6 @@ export interface StatusBlockSnapshot {
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
-export interface WorkerRunInfo {
-	id: string;
-	channel_id: string | null;
-	task: string;
-	result: string | null;
-	status: string;
-	started_at: string;
-	completed_at: string | null;
-}
-
-export interface WorkerRunsResponse {
-	runs: WorkerRunInfo[];
-	total: number;
-}
-
-export interface WorkerRunsParams {
-	limit?: number;
-	offset?: number;
-	status?: string;
-}
-
 export interface AgentInfo {
 	id: string;
 	workspace: string;
@@ -254,7 +233,6 @@ export interface AgentProfile {
 	status: string | null;
 	bio: string | null;
 	avatar_seed: string | null;
-	avatar_path: string | null;
 	generated_at: string;
 	updated_at: string;
 }
@@ -483,8 +461,6 @@ export interface RoutingSection {
 	compactor: string;
 	cortex: string;
 	rate_limit_cooldown_secs: number;
-	task_overrides: Record<string, string>;
-	fallbacks: Record<string, string[]>;
 }
 
 export interface TuningSection {
@@ -555,8 +531,6 @@ export interface RoutingUpdate {
 	compactor?: string;
 	cortex?: string;
 	rate_limit_cooldown_secs?: number;
-	task_overrides?: Record<string, string>;
-	fallbacks?: Record<string, string[]>;
 }
 
 export interface TuningUpdate {
@@ -619,41 +593,6 @@ export interface AgentConfigUpdateRequest {
 	discord?: DiscordUpdate;
 }
 
-// -- Skills Types --
-
-export interface SkillInfo {
-	name: string;
-	description: string;
-	source: "instance" | "workspace";
-	file_path: string;
-}
-
-export interface AgentSkillsResponse {
-	skills: SkillInfo[];
-}
-
-export interface InstanceSkillsResponse {
-	skills: SkillInfo[];
-	skills_dir: string;
-}
-
-export interface InstanceSkillActionResponse {
-	success: boolean;
-	message: string;
-}
-
-export interface CreateSkillRequest {
-	name: string;
-	description: string;
-	content: string;
-}
-
-export interface UpdateSkillRequest {
-	name: string;
-	description?: string;
-	content?: string;
-}
-
 // -- Cron Types --
 
 export interface CronJobWithStats {
@@ -714,8 +653,9 @@ export interface ProviderStatus {
 	deepseek: boolean;
 	xai: boolean;
 	mistral: boolean;
+	ollama: boolean;
 	opencode_zen: boolean;
-	zhipu_sub: boolean;
+	nvidia: boolean;
 }
 
 export interface ProvidersResponse {
@@ -735,7 +675,8 @@ export interface ModelInfo {
 	name: string;
 	provider: string;
 	context_window: number | null;
-	curated: boolean;
+	tool_call: boolean;
+	reasoning: boolean;
 }
 
 export interface ModelsResponse {
@@ -932,30 +873,6 @@ export interface OpenCodeSettingsUpdate {
 	permissions?: Partial<OpenCodePermissions>;
 }
 
-export interface CliBackendSettings {
-	command: string;
-	args: string[];
-	description: string;
-	timeout_secs: number;
-}
-
-export interface CliWorkersSettings {
-	enabled: boolean;
-	backends: Record<string, CliBackendSettings>;
-}
-
-export interface CliBackendSettingsUpdate {
-	command?: string;
-	args?: string[];
-	description?: string;
-	timeout_secs?: number;
-}
-
-export interface CliWorkersSettingsUpdate {
-	enabled?: boolean;
-	backends?: Record<string, CliBackendSettingsUpdate>;
-}
-
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
 	api_enabled: boolean;
@@ -963,7 +880,6 @@ export interface GlobalSettingsResponse {
 	api_bind: string;
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;
-	cli_workers: CliWorkersSettings;
 }
 
 export interface GlobalSettingsUpdate {
@@ -973,7 +889,6 @@ export interface GlobalSettingsUpdate {
 	api_bind?: string;
 	worker_log_mode?: string;
 	opencode?: OpenCodeSettingsUpdate;
-	cli_workers?: CliWorkersSettingsUpdate;
 }
 
 export interface GlobalSettingsUpdateResponse {
@@ -1057,20 +972,6 @@ export const api = {
 		}),
 	agentProfile: (agentId: string) =>
 		fetchJson<AgentProfileResponse>(`/agents/profile?agent_id=${encodeURIComponent(agentId)}`),
-	uploadAvatar: async (agentId: string, file: File) => {
-		const formData = new FormData();
-		formData.append("file", file);
-		const response = await fetch(
-			`${API_BASE}/agents/avatar/upload?agent_id=${encodeURIComponent(agentId)}`,
-			{ method: "POST", body: formData },
-		);
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<{ filename: string }>;
-	},
-	avatarUrl: (agentId: string) =>
-		`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
 	agentIdentity: (agentId: string) =>
 		fetchJson<IdentityFiles>(`/agents/identity?agent_id=${encodeURIComponent(agentId)}`),
 	updateIdentity: async (request: IdentityUpdateRequest) => {
@@ -1098,8 +999,6 @@ export const api = {
 
 	agentConfig: (agentId: string) =>
 		fetchJson<AgentConfigResponse>(`/agents/config?agent_id=${encodeURIComponent(agentId)}`),
-	agentSkills: (agentId: string) =>
-		fetchJson<AgentSkillsResponse>(`/agents/skills?agent_id=${encodeURIComponent(agentId)}`),
 	updateAgentConfig: async (request: AgentConfigUpdateRequest) => {
 		const response = await fetch(`${API_BASE}/agents/config`, {
 			method: "PUT",
@@ -1110,15 +1009,6 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<AgentConfigResponse>;
-	},
-
-	// Worker runs API
-	workerRuns: (agentId: string, params: WorkerRunsParams = {}) => {
-		const search = new URLSearchParams({ agent_id: agentId });
-		if (params.limit) search.set("limit", String(params.limit));
-		if (params.offset) search.set("offset", String(params.offset));
-		if (params.status) search.set("status", params.status);
-		return fetchJson<WorkerRunsResponse>(`/agents/workers?${search}`);
 	},
 
 	// Cron API
@@ -1339,41 +1229,6 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<GlobalSettingsUpdateResponse>;
-	},
-
-	// Instance Skills API
-	instanceSkills: () => fetchJson<InstanceSkillsResponse>("/settings/skills"),
-	createInstanceSkill: async (request: CreateSkillRequest) => {
-		const response = await fetch(`${API_BASE}/settings/skills`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(request),
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<InstanceSkillActionResponse>;
-	},
-	updateInstanceSkill: async (request: UpdateSkillRequest) => {
-		const response = await fetch(`${API_BASE}/settings/skills`, {
-			method: "PUT",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(request),
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<InstanceSkillActionResponse>;
-	},
-	deleteInstanceSkill: async (name: string) => {
-		const params = new URLSearchParams({ name });
-		const response = await fetch(`${API_BASE}/settings/skills?${params}`, {
-			method: "DELETE",
-		});
-		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
-		}
-		return response.json() as Promise<InstanceSkillActionResponse>;
 	},
 
 	// Raw config API

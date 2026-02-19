@@ -527,6 +527,8 @@ impl Channel {
             .render_coalesce_hint(message_count, &elapsed_str, unique_senders)
             .ok();
         
+        let available_channels = self.build_available_channels().await;
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
         
         prompt_engine
@@ -538,6 +540,7 @@ impl Channel {
                 self.conversation_context.clone(),
                 empty_to_none(status_text),
                 coalesce_hint,
+                available_channels,
             )
             .expect("failed to render channel prompt")
     }
@@ -631,6 +634,45 @@ impl Channel {
         Ok(())
     }
 
+    /// Build the rendered available channels fragment for cross-channel awareness.
+    async fn build_available_channels(&self) -> Option<String> {
+        if self.deps.messaging_manager.is_none() {
+            return None;
+        }
+
+        let channels = match self.state.channel_store.list_active().await {
+            Ok(channels) => channels,
+            Err(error) => {
+                tracing::warn!(%error, "failed to list channels for system prompt");
+                return None;
+            }
+        };
+
+        // Filter out the current channel and cron channels
+        let entries: Vec<crate::prompts::engine::ChannelEntry> = channels
+            .into_iter()
+            .filter(|channel| {
+                channel.id.as_str() != self.id.as_ref()
+                    && channel.platform != "cron"
+                    && channel.platform != "webhook"
+            })
+            .map(|channel| crate::prompts::engine::ChannelEntry {
+                name: channel
+                    .display_name
+                    .unwrap_or_else(|| channel.id.clone()),
+                platform: channel.platform,
+                id: channel.id,
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let prompt_engine = self.deps.runtime_config.prompts.load();
+        prompt_engine.render_available_channels(entries).ok()
+    }
+
     /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> String {
         let rc = &self.deps.runtime_config;
@@ -653,6 +695,8 @@ impl Channel {
             status.render()
         };
 
+        let available_channels = self.build_available_channels().await;
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine
@@ -664,6 +708,7 @@ impl Channel {
                 self.conversation_context.clone(),
                 empty_to_none(status_text),
                 None, // coalesce_hint - only set for batched messages
+                available_channels,
             )
             .expect("failed to render channel prompt")
     }
@@ -892,6 +937,7 @@ impl Channel {
                     content: crate::MessageContent::Text(retrigger_message),
                     timestamp: chrono::Utc::now(),
                     metadata: std::collections::HashMap::new(),
+                    formatted_author: None,
                 };
                 if let Err(error) = self.self_tx.try_send(synthetic) {
                     tracing::warn!(%error, "failed to re-trigger channel after process completion");
@@ -1373,6 +1419,12 @@ where
     E: std::fmt::Display + Send + 'static,
 {
     tokio::spawn(async move {
+        #[cfg(feature = "metrics")]
+        crate::telemetry::Metrics::global()
+            .active_workers
+            .with_label_values(&[&*agent_id])
+            .inc();
+
         let (result_text, notify) = match future.await {
             Ok(text) => (text, true),
             Err(error) => {
@@ -1380,6 +1432,12 @@ where
                 (format!("Worker failed: {error}"), true)
             }
         };
+        #[cfg(feature = "metrics")]
+        crate::telemetry::Metrics::global()
+            .active_workers
+            .with_label_values(&[&*agent_id])
+            .dec();
+
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,
             worker_id,
@@ -1444,9 +1502,9 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         return raw_text.to_string();
     }
 
-    let display_name = message.metadata
-        .get("sender_display_name")
-        .and_then(|v| v.as_str())
+    // Use platform-formatted author if available, fall back to metadata
+    let display_name = message.formatted_author.as_deref()
+        .or_else(|| message.metadata.get("sender_display_name").and_then(|v| v.as_str()))
         .unwrap_or(&message.sender_id);
 
     let bot_tag = if message.metadata.get("sender_is_bot").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -1471,7 +1529,7 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         })
         .unwrap_or_default();
 
-    format!("[{display_name}]{bot_tag}{reply_context}: {raw_text}")
+    format!("{display_name}{bot_tag}{reply_context}: {raw_text}")
 }
 
 /// Check if a ProcessEvent is targeted at a specific channel.
