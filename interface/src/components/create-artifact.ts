@@ -1,6 +1,6 @@
 import type { Dispatch, SetStateAction, ComponentType, ReactNode } from "react";
 
-export type ArtifactKind = "code" | "text" | "image" | "sheet";
+export type ArtifactKind = "code" | "text" | "image" | "sheet" | "book";
 
 export interface UIArtifact {
 	id: string;

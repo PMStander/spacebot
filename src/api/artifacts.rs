@@ -335,6 +335,17 @@ pub fn detect_artifact_kind(content: &str) -> Option<&'static str> {
         return Some("image");
     }
 
+    // Book: JSON object with a "pages" array whose first page has "panels"
+    if trimmed.starts_with('{') {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let has_pages = val.get("pages").and_then(|v| v.as_array()).is_some();
+            let has_panels = val["pages"][0].get("panels").is_some();
+            if has_pages && has_panels {
+                return Some("book");
+            }
+        }
+    }
+
     // Sheet: multiple lines with commas (CSV-like)
     let lines: Vec<&str> = trimmed.lines().collect();
     if lines.len() >= 2 && lines.iter().all(|l| l.contains(',')) {

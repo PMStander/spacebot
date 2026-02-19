@@ -928,7 +928,7 @@ export interface RawConfigUpdateResponse {
 export interface ArtifactInfo {
 	id: string;
 	channel_id: string | null;
-	kind: "code" | "text" | "image" | "sheet";
+	kind: "code" | "text" | "image" | "sheet" | "book";
 	title: string;
 	content: string;
 	metadata: Record<string, unknown> | null;
@@ -959,6 +959,19 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<{ id: string; platform: string; display_name: string | null; agent_id: string }>;
+	},
+	renameChannel: async (agentId: string, channelId: string, displayName: string) => {
+		const response = await fetch(`${API_BASE}/channels`, {
+			method: "PATCH",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, channel_id: channelId, display_name: displayName }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+	},
+	deleteChannel: async (agentId: string, channelId: string) => {
+		const params = new URLSearchParams({ agent_id: agentId, channel_id: channelId });
+		const response = await fetch(`${API_BASE}/channels?${params}`, { method: "DELETE" });
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
 	},
 	channelMessages: (channelId: string, limit = 20, before?: string) => {
 		const params = new URLSearchParams({ channel_id: channelId, limit: String(limit) });

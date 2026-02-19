@@ -21,6 +21,7 @@ mod settings;
 mod skills;
 mod state;
 mod system;
+mod local_file;
 mod workers;
 
 pub use server::start_http_server;

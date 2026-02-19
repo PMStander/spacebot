@@ -1,7 +1,7 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, artifacts, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, workers};
+use super::{agents, artifacts, bindings, channels, config, cortex, cron, ingest, local_file, memories, messaging, models, providers, settings, skills, system, workers};
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -41,7 +41,7 @@ pub async fn start_http_server(
         .route("/events", get(system::events_sse))
         .route("/agents", get(agents::list_agents).post(agents::create_agent))
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels).post(channels::create_internal_channel))
+        .route("/channels", get(channels::list_channels).post(channels::create_internal_channel).patch(channels::rename_channel).delete(channels::delete_channel))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
@@ -81,7 +81,8 @@ pub async fn start_http_server(
         .route("/update/check", get(settings::update_check).post(settings::update_check_now))
         .route("/update/apply", post(settings::update_apply))
         .route("/agents/artifacts", get(artifacts::list_artifacts).post(artifacts::create_artifact))
-        .route("/agents/artifacts/{id}", get(artifacts::get_artifact).put(artifacts::update_artifact).delete(artifacts::delete_artifact));
+        .route("/agents/artifacts/{id}", get(artifacts::get_artifact).put(artifacts::update_artifact).delete(artifacts::delete_artifact))
+        .route("/local-file", get(local_file::serve_local_file));
 
     let app = Router::new()
         .nest("/api", api_routes)
