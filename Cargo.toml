@@ -134,3 +134,6 @@ unimplemented = "forbid"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[workspace]
+members = [".", "src-tauri"]
