@@ -14,10 +14,13 @@ fn main() {
 
     tauri::Builder::default()
         .setup(|_app| {
-            tauri::async_runtime::spawn(async {
-                if let Err(e) = start_server().await {
-                    eprintln!("Server error: {e:#}");
-                }
+            std::thread::spawn(|| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    if let Err(e) = start_server().await {
+                        eprintln!("Server error: {e:#}");
+                    }
+                });
             });
             Ok(())
         })

@@ -1,6 +1,6 @@
 //! Configuration loading and validation.
 
-use crate::error::Result;
+use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
