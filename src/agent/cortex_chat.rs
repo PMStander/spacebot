@@ -355,6 +355,10 @@ impl CortexChatSession {
             None
         };
 
+        // Render skills so the cortex knows what skills are available for workers
+        let skills = runtime_config.skills.load();
+        let skills_rendered = skills.render_channel_prompt(&prompt_engine);
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine
@@ -363,6 +367,7 @@ impl CortexChatSession {
                 empty_to_none(memory_bulletin.to_string()),
                 channel_transcript,
                 worker_capabilities,
+                empty_to_none(skills_rendered),
             )
             .expect("failed to render cortex chat prompt")
     }

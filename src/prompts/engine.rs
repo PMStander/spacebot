@@ -397,13 +397,14 @@ impl PromptEngine {
         )
     }
 
-    /// Render the cortex chat system prompt with optional channel context.
+    /// Render the cortex chat system prompt with optional channel context and skills.
     pub fn render_cortex_chat_prompt(
         &self,
         identity_context: Option<String>,
         memory_bulletin: Option<String>,
         channel_transcript: Option<String>,
         worker_capabilities: String,
+        skills_prompt: Option<String>,
     ) -> Result<String> {
         self.render(
             "cortex_chat",
@@ -412,6 +413,7 @@ impl PromptEngine {
                 memory_bulletin => memory_bulletin,
                 channel_transcript => channel_transcript,
                 worker_capabilities => worker_capabilities,
+                skills_prompt => skills_prompt,
             },
         )
     }
