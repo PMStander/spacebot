@@ -1,7 +1,7 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system};
+use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, workers};
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -58,6 +58,7 @@ pub async fn start_http_server(
         .route("/agents/cron/executions", get(cron::cron_executions))
         .route("/agents/cron/trigger", post(cron::trigger_cron))
         .route("/agents/cron/toggle", put(cron::toggle_cron))
+        .route("/agents/workers", get(workers::list_worker_runs))
         .route("/channels/cancel", post(channels::cancel_process))
         .route("/agents/ingest/files", get(ingest::list_ingest_files).delete(ingest::delete_ingest_file))
         .route("/agents/ingest/upload", post(ingest::upload_ingest_file))

@@ -152,6 +152,8 @@ pub struct DefaultsConfig {
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
+    /// CLI worker backends (Factory Droid, Claude Code CLI, etc.).
+    pub cli_workers: crate::cli_worker::CliWorkersConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
 }
@@ -435,6 +437,7 @@ impl Default for DefaultsConfig {
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
+            cli_workers: crate::cli_worker::CliWorkersConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
         }
     }
@@ -992,7 +995,27 @@ struct TomlDefaultsConfig {
     browser: Option<TomlBrowserConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
+    cli_workers: Option<TomlCliWorkersConfig>,
     worker_log_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlCliWorkersConfig {
+    enabled: Option<bool>,
+    #[serde(default)]
+    backends: std::collections::HashMap<String, TomlCliBackendConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlCliBackendConfig {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1650,6 +1673,35 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.opencode.clone()),
+            cli_workers: toml
+                .defaults
+                .cli_workers
+                .map(|cw| {
+                    let base = &base_defaults.cli_workers;
+                    let mut backends = base.backends.clone();
+                    for (name, backend) in cw.backends {
+                        let resolved_command = resolve_env_value(&backend.command)
+                            .unwrap_or(backend.command);
+                        let mut resolved_env = std::collections::HashMap::new();
+                        for (key, value) in &backend.env {
+                            if let Some(resolved) = resolve_env_value(value) {
+                                resolved_env.insert(key.clone(), resolved);
+                            }
+                        }
+                        backends.insert(name, crate::cli_worker::CliBackendConfig {
+                            command: resolved_command,
+                            args: backend.args,
+                            description: backend.description.unwrap_or_default(),
+                            env: resolved_env,
+                            timeout_secs: backend.timeout_secs.unwrap_or(600),
+                        });
+                    }
+                    crate::cli_worker::CliWorkersConfig {
+                        enabled: cw.enabled.unwrap_or(base.enabled),
+                        backends,
+                    }
+                })
+                .unwrap_or_else(|| base_defaults.cli_workers.clone()),
             worker_log_mode: toml
                 .defaults
                 .worker_log_mode
@@ -1976,6 +2028,7 @@ pub struct RuntimeConfig {
     pub identity: ArcSwap<crate::identity::Identity>,
     pub skills: ArcSwap<crate::skills::SkillSet>,
     pub opencode: ArcSwap<OpenCodeConfig>,
+    pub cli_workers: ArcSwap<crate::cli_worker::CliWorkersConfig>,
     /// Shared pool of OpenCode server processes. Lazily initialized on first use.
     pub opencode_server_pool: Arc<crate::opencode::OpenCodeServerPool>,
     /// Cron store, set after agent initialization.
@@ -2025,6 +2078,7 @@ impl RuntimeConfig {
             identity: ArcSwap::from_pointee(identity),
             skills: ArcSwap::from_pointee(skills),
             opencode: ArcSwap::from_pointee(defaults.opencode.clone()),
+            cli_workers: ArcSwap::from_pointee(defaults.cli_workers.clone()),
             opencode_server_pool: Arc::new(server_pool),
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
