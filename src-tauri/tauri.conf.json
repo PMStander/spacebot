@@ -1,0 +1,27 @@
+{
+  "productName": "Spacebot",
+  "version": "0.1.7",
+  "identifier": "sh.spacebot.desktop",
+  "build": {
+    "devUrl": "http://localhost:19840",
+    "frontendDist": "http://localhost:19898"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Spacebot",
+        "url": "http://localhost:19898",
+        "width": 1200,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}
