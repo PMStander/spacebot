@@ -135,6 +135,9 @@ pub(super) async fn cortex_chat_send(
                 CortexChatEvent::ToolCompleted { .. } => "tool_completed",
                 CortexChatEvent::Done { .. } => "done",
                 CortexChatEvent::Error { .. } => "error",
+                CortexChatEvent::ArtifactStart { .. } => "artifact_start",
+                CortexChatEvent::ArtifactDelta { .. } => "artifact_delta",
+                CortexChatEvent::ArtifactDone { .. } => "artifact_done",
             };
             if let Ok(json) = serde_json::to_string(&event) {
                 yield Ok(axum::response::sse::Event::default()

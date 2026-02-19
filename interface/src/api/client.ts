@@ -116,8 +116,8 @@ export type ApiEvent =
 	| ToolStartedEvent
 	| ToolCompletedEvent;
 
-async function fetchJson<T>(path: string): Promise<T> {
-	const response = await fetch(`${API_BASE}${path}`);
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+	const response = await fetch(`${API_BASE}${path}`, init);
 	if (!response.ok) {
 		throw new Error(`API error: ${response.status}`);
 	}
@@ -183,6 +183,21 @@ export interface CompletedItemInfo {
 	result_summary: string;
 }
 
+export interface WorkerRunInfo {
+	id: string;
+	channel_id: string | null;
+	task: string;
+	result: string | null;
+	status: string;
+	started_at: string;
+	completed_at: string | null;
+}
+
+export interface WorkerRunsResponse {
+	runs: WorkerRunInfo[];
+	total: number;
+}
+
 export interface StatusBlockSnapshot {
 	active_workers: WorkerStatusInfo[];
 	active_branches: BranchStatusInfo[];
@@ -233,6 +248,7 @@ export interface AgentProfile {
 	status: string | null;
 	bio: string | null;
 	avatar_seed: string | null;
+	avatar_path: string | null;
 	generated_at: string;
 	updated_at: string;
 }
@@ -647,6 +663,7 @@ export interface ProviderStatus {
 	openai: boolean;
 	openrouter: boolean;
 	zhipu: boolean;
+	zhipu_sub: boolean;
 	groq: boolean;
 	together: boolean;
 	fireworks: boolean;
@@ -906,6 +923,25 @@ export interface RawConfigUpdateResponse {
 	message: string;
 }
 
+// -- Artifact Types --
+
+export interface ArtifactInfo {
+	id: string;
+	channel_id: string | null;
+	kind: "code" | "text" | "image" | "sheet";
+	title: string;
+	content: string;
+	metadata: Record<string, unknown> | null;
+	version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ArtifactsResponse {
+	artifacts: ArtifactInfo[];
+	total: number;
+}
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
@@ -913,12 +949,30 @@ export const api = {
 	agentOverview: (agentId: string) =>
 		fetchJson<AgentOverviewResponse>(`/agents/overview?agent_id=${encodeURIComponent(agentId)}`),
 	channels: () => fetchJson<ChannelsResponse>("/channels"),
+	createChannel: async (agentId: string, displayName?: string) => {
+		const response = await fetch(`${API_BASE}/channels`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, display_name: displayName ?? "New Chat" }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ id: string; platform: string; display_name: string | null; agent_id: string }>;
+	},
 	channelMessages: (channelId: string, limit = 20, before?: string) => {
 		const params = new URLSearchParams({ channel_id: channelId, limit: String(limit) });
 		if (before) params.set("before", before);
 		return fetchJson<MessagesResponse>(`/channels/messages?${params}`);
 	},
 	channelStatus: () => fetchJson<ChannelStatusResponse>("/channels/status"),
+	workerRuns: (agentId: string, params: { limit?: number; offset?: number; status?: string } = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		if (params.status) search.set("status", params.status);
+		return fetchJson<WorkerRunsResponse>(`/agents/workers?${search}`);
+	},
 	agentMemories: (agentId: string, params: MemoriesListParams = {}) => {
 		const search = new URLSearchParams({ agent_id: agentId });
 		if (params.limit) search.set("limit", String(params.limit));
@@ -1302,4 +1356,51 @@ export const api = {
 		),
 
 	eventsUrl: `${API_BASE}/events`,
+
+	// Avatar API
+	avatarUrl: (agentId: string) =>
+		`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
+
+	uploadAvatar: async (agentId: string, file: File) => {
+		const formData = new FormData();
+		formData.append("avatar", file);
+		const response = await fetch(
+			`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean }>;
+	},
+
+	// Artifacts API
+	artifacts: (agentId: string, params: { channel_id?: string; kind?: string; limit?: number; offset?: number } = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.channel_id) search.set("channel_id", params.channel_id);
+		if (params.kind) search.set("kind", params.kind);
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		return fetchJson<ArtifactsResponse>(`/agents/artifacts?${search}`);
+	},
+
+	getArtifact: (agentId: string, artifactId: string) =>
+		fetchJson<ArtifactInfo>(`/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`),
+
+	createArtifact: (agentId: string, body: { channel_id?: string; kind: string; title: string; content: string; metadata?: Record<string, unknown> | null }) =>
+		fetchJson<ArtifactInfo>(`/agents/artifacts`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, ...body }),
+		}),
+
+	updateArtifact: (agentId: string, artifactId: string, body: { content?: string; title?: string; metadata?: Record<string, unknown> | null }) =>
+		fetchJson<ArtifactInfo>(`/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		}),
+
+	deleteArtifact: (agentId: string, artifactId: string) =>
+		fetch(`${API_BASE}/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`, { method: "DELETE" }),
 };

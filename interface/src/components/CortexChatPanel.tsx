@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useCortexChat, type ToolActivity } from "@/hooks/useCortexChat";
+import { useCortexChat, type ToolActivity, type ArtifactPayload } from "@/hooks/useCortexChat";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/ui";
 import { PlusSignIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
@@ -9,6 +9,7 @@ interface CortexChatPanelProps {
 	agentId: string;
 	channelId?: string;
 	onClose?: () => void;
+	onArtifactReceived?: (artifact: ArtifactPayload) => void;
 }
 
 function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
@@ -38,8 +39,8 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 	);
 }
 
-export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanelProps) {
-	const { messages, isStreaming, error, toolActivity, sendMessage, newThread } = useCortexChat(agentId, channelId);
+export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceived }: CortexChatPanelProps) {
+	const { messages, isStreaming, error, toolActivity, sendMessage, newThread } = useCortexChat(agentId, channelId, onArtifactReceived);
 	const [input, setInput] = useState("");
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);

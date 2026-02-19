@@ -355,6 +355,17 @@ interface ConfigSectionEditorProps {
 }
 
 function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
+	const readRoutingMaps = () => {
+		const routing = config.routing as AgentConfigResponse["routing"] & {
+			task_overrides?: Record<string, string> | null;
+			fallbacks?: Record<string, string[]> | null;
+		};
+		return {
+			taskOverrides: { ...(routing.task_overrides ?? {}) },
+			fallbacks: structuredClone(routing.fallbacks ?? {}),
+		};
+	};
+
 	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean>>(() => {
 		// Initialize from config based on section (flat scalar fields only)
 		switch (sectionId) {
@@ -381,10 +392,10 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 	// Nested objects for routing: task_overrides and fallbacks
 	const [taskOverrides, setTaskOverrides] = useState<Record<string, string>>(
-		() => sectionId === "routing" ? { ...(config.routing.task_overrides ?? {}) } : {}
+		() => sectionId === "routing" ? readRoutingMaps().taskOverrides : {}
 	);
 	const [fallbacks, setFallbacks] = useState<Record<string, string[]>>(
-		() => sectionId === "routing" ? structuredClone(config.routing.fallbacks ?? {}) : {}
+		() => sectionId === "routing" ? readRoutingMaps().fallbacks : {}
 	);
 
 	const [localDirty, setLocalDirty] = useState(false);
@@ -400,8 +411,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				case "routing": {
 					const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
 					setLocalValues({ ...flat });
-					setTaskOverrides({ ...config.routing.task_overrides });
-					setFallbacks(structuredClone(config.routing.fallbacks));
+					const routingMaps = readRoutingMaps();
+					setTaskOverrides(routingMaps.taskOverrides);
+					setFallbacks(routingMaps.fallbacks);
 					break;
 				}
 				case "tuning":
@@ -445,8 +457,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 			case "routing": {
 				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
 				setLocalValues({ ...flat });
-				setTaskOverrides({ ...(config.routing.task_overrides ?? {}) });
-				setFallbacks(structuredClone(config.routing.fallbacks ?? {}));
+				const routingMaps = readRoutingMaps();
+				setTaskOverrides(routingMaps.taskOverrides);
+				setFallbacks(routingMaps.fallbacks);
 				break;
 			}
 			case "tuning":

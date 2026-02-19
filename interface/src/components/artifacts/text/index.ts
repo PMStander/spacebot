@@ -13,9 +13,10 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { DocumentSkeleton } from "./DocumentSkeleton";
 import { DiffView } from "./DiffView";
 import { TextEditor } from "./TextEditor";
+import type { Suggestion } from "./suggestions";
 
 type TextMetadata = {
-  suggestions: any[];
+  suggestions: Suggestion[];
 };
 
 function TextContent(props: ArtifactContentProps<TextMetadata>) {
@@ -35,6 +36,7 @@ function TextContent(props: ArtifactContentProps<TextMetadata>) {
       isCurrentVersion: props.isCurrentVersion,
       onSaveContent: props.onSaveContent,
       status: props.status,
+      suggestions: props.metadata?.suggestions ?? [],
     }),
   );
 }
@@ -45,7 +47,7 @@ export const textArtifact = new Artifact<"text", TextMetadata>({
   initialize: ({ setMetadata }) => {
     setMetadata({ suggestions: [] });
   },
-  onStreamPart: ({ streamPart, setArtifact }) => {
+  onStreamPart: ({ streamPart, setArtifact, setMetadata }) => {
     if (streamPart.type === "artifact_delta") {
       setArtifact((draft) => ({
         ...draft,
@@ -57,6 +59,14 @@ export const textArtifact = new Artifact<"text", TextMetadata>({
             ? true
             : draft.isVisible,
         status: "streaming",
+      }));
+    }
+
+    // Incoming suggestion from the agent (type: "suggestion")
+    if (streamPart.type === "suggestion" && streamPart.data) {
+      setMetadata((prev) => ({
+        ...prev,
+        suggestions: [...(prev.suggestions ?? []), streamPart.data as Suggestion],
       }));
     }
   },

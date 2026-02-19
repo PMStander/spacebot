@@ -1,7 +1,7 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, workers};
+use super::{agents, artifacts, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, workers};
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -41,7 +41,7 @@ pub async fn start_http_server(
         .route("/events", get(system::events_sse))
         .route("/agents", get(agents::list_agents).post(agents::create_agent))
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels))
+        .route("/channels", get(channels::list_channels).post(channels::create_internal_channel))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
@@ -52,6 +52,7 @@ pub async fn start_http_server(
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
         .route("/agents/profile", get(agents::get_agent_profile))
+        .route("/agents/avatar", get(agents::get_agent_avatar).post(agents::upload_agent_avatar))
         .route("/agents/identity", get(agents::get_identity).put(agents::update_identity))
         .route("/agents/config", get(config::get_agent_config).put(config::update_agent_config))
         .route("/agents/cron", get(cron::list_cron_jobs).post(cron::create_or_update_cron).delete(cron::delete_cron))
@@ -78,7 +79,9 @@ pub async fn start_http_server(
         .route("/settings", get(settings::get_global_settings).put(settings::update_global_settings))
         .route("/config/raw", get(settings::get_raw_config).put(settings::update_raw_config))
         .route("/update/check", get(settings::update_check).post(settings::update_check_now))
-        .route("/update/apply", post(settings::update_apply));
+        .route("/update/apply", post(settings::update_apply))
+        .route("/agents/artifacts", get(artifacts::list_artifacts).post(artifacts::create_artifact))
+        .route("/agents/artifacts/{id}", get(artifacts::get_artifact).put(artifacts::update_artifact).delete(artifacts::delete_artifact));
 
     let app = Router::new()
         .nest("/api", api_routes)

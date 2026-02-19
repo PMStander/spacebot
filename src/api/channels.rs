@@ -10,6 +10,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Deserialize)]
+pub(super) struct CreateChannelRequest {
+    agent_id: String,
+    display_name: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct CreateChannelResponseBody {
+    id: String,
+    platform: String,
+    display_name: Option<String>,
+    agent_id: String,
+}
+
 #[derive(Serialize)]
 pub(super) struct ChannelResponse {
     agent_id: String,
@@ -134,6 +148,38 @@ pub(super) async fn channel_status(
     }
 
     Json(result)
+}
+
+/// Create a new internal chat channel for an agent.
+pub(super) async fn create_internal_channel(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<CreateChannelRequest>,
+) -> Result<Json<CreateChannelResponseBody>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool: sqlx::SqlitePool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+
+    let channel_id = format!("internal:{}", uuid::Uuid::new_v4());
+    let display_name = request.display_name.or_else(|| Some("New Chat".to_string()));
+
+    sqlx::query(
+        "INSERT INTO channels (id, platform, display_name, platform_meta, last_activity_at) \
+         VALUES (?, 'internal', ?, NULL, CURRENT_TIMESTAMP)"
+    )
+    .bind(&channel_id)
+    .bind(&display_name)
+    .execute(&pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "failed to create internal channel");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(CreateChannelResponseBody {
+        id: channel_id,
+        platform: "internal".to_string(),
+        display_name,
+        agent_id: request.agent_id,
+    }))
 }
 
 /// Cancel a running worker or branch via the API.

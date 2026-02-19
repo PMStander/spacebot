@@ -10,7 +10,7 @@ use rig::completion::{
 };
 use rig::message::{
     AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
-    ToolResult, UserContent,
+    UserContent,
 };
 use rig::one_or_many::OneOrMany;
 use rig::streaming::StreamingCompletionResponse;
@@ -70,6 +70,7 @@ impl SpacebotModel {
             "openai" => self.call_openai(request).await,
             "openrouter" => self.call_openrouter(request).await,
             "zhipu" => self.call_zhipu(request).await,
+            "zhipu-sub" => self.call_zhipu_sub(request).await,
             "groq" => self.call_groq(request).await,
             "together" => self.call_together(request).await,
             "fireworks" => self.call_fireworks(request).await,
@@ -629,6 +630,18 @@ impl SpacebotModel {
         }
 
         parse_openai_response(response_body, "Z.ai")
+    }
+
+    async fn call_zhipu_sub(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_openai_compatible(
+            request,
+            "zhipu-sub",
+            "Z.ai Subscription",
+            "https://api.z.ai/api/coding/paas/v4/chat/completions",
+        ).await
     }
 
     /// Generic OpenAI-compatible API call.

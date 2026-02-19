@@ -5,6 +5,7 @@
 //! Includes an SSE endpoint for realtime event streaming.
 
 mod agents;
+mod artifacts;
 mod bindings;
 mod channels;
 mod config;

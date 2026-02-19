@@ -5,8 +5,16 @@ import { DOMParser, Schema, type Node } from "prosemirror-model";
 import { schema as basicSchema } from "prosemirror-schema-basic";
 import { addListNodes } from "prosemirror-schema-list";
 import { EditorState, type Transaction } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
+import { DecorationSet, EditorView } from "prosemirror-view";
 import { memo, useEffect, useRef } from "react";
+
+import {
+	type Suggestion,
+	suggestionsPlugin,
+	suggestionsPluginKey,
+	projectWithPositions,
+	createDecorations,
+} from "./suggestions";
 
 // --- Schema ---
 
@@ -49,6 +57,17 @@ function buildContentFromDocument(doc: Node): string {
   return defaultMarkdownSerializer.serialize(doc);
 }
 
+function replaceEditorContent(view: EditorView, content: string): void {
+  const newDocument = buildDocumentFromContent(content);
+  const transaction = view.state.tr.replaceWith(
+    0,
+    view.state.doc.content.size,
+    newDocument.content,
+  );
+  transaction.setMeta("no-save", true);
+  view.dispatch(transaction);
+}
+
 // --- Transaction handler ---
 
 function handleTransaction({
@@ -82,9 +101,10 @@ type EditorProps = {
   onSaveContent: (updatedContent: string, debounce: boolean) => void;
   status: "streaming" | "idle";
   isCurrentVersion: boolean;
+  suggestions: Suggestion[];
 };
 
-function PureEditor({ content, onSaveContent, status }: EditorProps) {
+function PureEditor({ content, onSaveContent, status, suggestions }: EditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorView | null>(null);
 
@@ -104,6 +124,7 @@ function PureEditor({ content, onSaveContent, status }: EditorProps) {
               headingRule(6),
             ],
           }),
+          suggestionsPlugin,
         ],
       });
 
@@ -137,29 +158,34 @@ function PureEditor({ content, onSaveContent, status }: EditorProps) {
       );
 
       if (status === "streaming") {
-        const newDocument = buildDocumentFromContent(content);
-        const transaction = editorRef.current.state.tr.replaceWith(
-          0,
-          editorRef.current.state.doc.content.size,
-          newDocument.content,
-        );
-        transaction.setMeta("no-save", true);
-        editorRef.current.dispatch(transaction);
+        replaceEditorContent(editorRef.current, content);
         return;
       }
 
       if (currentContent !== content) {
-        const newDocument = buildDocumentFromContent(content);
-        const transaction = editorRef.current.state.tr.replaceWith(
-          0,
-          editorRef.current.state.doc.content.size,
-          newDocument.content,
-        );
-        transaction.setMeta("no-save", true);
-        editorRef.current.dispatch(transaction);
+        replaceEditorContent(editorRef.current, content);
       }
     }
   }, [content, status]);
+
+  // Project suggestions onto the current document and apply as decorations.
+  // Re-runs whenever suggestions or document content changes.
+  useEffect(() => {
+    if (!editorRef.current) return;
+    const view = editorRef.current;
+
+    let decorations: DecorationSet;
+    if (suggestions.length === 0) {
+      decorations = DecorationSet.empty;
+    } else {
+      const projected = projectWithPositions(view.state.doc, suggestions);
+      decorations = createDecorations(projected, view);
+    }
+
+    const tr = view.state.tr;
+    tr.setMeta(suggestionsPluginKey, { decorations });
+    view.dispatch(tr);
+  }, [suggestions, content]);
 
   return (
     <div className="prose dark:prose-invert relative" ref={containerRef} />
@@ -168,6 +194,7 @@ function PureEditor({ content, onSaveContent, status }: EditorProps) {
 
 function areEqual(prevProps: EditorProps, nextProps: EditorProps) {
   return (
+    prevProps.suggestions === nextProps.suggestions &&
     prevProps.isCurrentVersion === nextProps.isCurrentVersion &&
     !(prevProps.status === "streaming" && nextProps.status === "streaming") &&
     prevProps.content === nextProps.content &&

@@ -96,6 +96,13 @@ const PROVIDERS = [
 		defaultModel: "gpt-4.1",
 	},
 	{
+		id: "zhipu-sub",
+		name: "Z.ai Subscription",
+		description: "GLM models via Z.ai coding subscription plan",
+		placeholder: "...",
+		envVar: "ZHIPU_SUB_API_KEY",
+	},
+	{
 		id: "zhipu",
 		name: "Z.ai (GLM)",
 		description: "GLM models (GLM-4, GLM-4-Flash)",
@@ -260,7 +267,9 @@ export function Settings() {
 
 	const isConfigured = (providerId: string): boolean => {
 		if (!data) return false;
-		return data.providers[providerId as keyof typeof data.providers] ?? false;
+		// Provider IDs use hyphens (e.g. "opencode-zen") but the JSON keys use underscores (e.g. "opencode_zen")
+		const key = providerId.replace(/-/g, "_") as keyof typeof data.providers;
+		return data.providers[key] ?? false;
 	};
 
 	return (

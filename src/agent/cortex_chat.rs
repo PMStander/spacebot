@@ -40,10 +40,16 @@ pub enum CortexChatEvent {
     ToolStarted { tool: String },
     /// A tool call completed.
     ToolCompleted { tool: String, result_preview: String },
-    /// The full response is ready.
+    /// The full response is ready (artifact markup already stripped).
     Done { full_text: String },
     /// An error occurred.
     Error { message: String },
+    /// An artifact block started (kind + title).
+    ArtifactStart { artifact_id: String, kind: String, title: String },
+    /// A chunk of artifact content.
+    ArtifactDelta { artifact_id: String, data: String },
+    /// Artifact content is complete.
+    ArtifactDone { artifact_id: String },
 }
 
 /// Prompt hook that forwards tool events to an mpsc channel for SSE streaming.
@@ -288,12 +294,30 @@ impl CortexChatSession {
 
             match result {
                 Ok(response) => {
+                    // Parse any <artifact> blocks before saving/returning
+                    let artifacts = parse_artifact_tags(&response);
+                    let display_text = strip_artifact_tags(&response);
+
                     let _ = store
-                        .save_message(&thread_id, "assistant", &response, channel_ref)
+                        .save_message(&thread_id, "assistant", &display_text, channel_ref)
                         .await;
                     let _ = event_tx.send(CortexChatEvent::Done {
-                        full_text: response,
+                        full_text: display_text,
                     });
+
+                    // Emit artifact events after Done so the client can open the panel
+                    for (artifact_id, kind, title, content) in artifacts {
+                        let _ = event_tx.send(CortexChatEvent::ArtifactStart {
+                            artifact_id: artifact_id.clone(),
+                            kind: kind.clone(),
+                            title: title.clone(),
+                        });
+                        let _ = event_tx.send(CortexChatEvent::ArtifactDelta {
+                            artifact_id: artifact_id.clone(),
+                            data: content,
+                        });
+                        let _ = event_tx.send(CortexChatEvent::ArtifactDone { artifact_id });
+                    }
                 }
                 Err(error) => {
                     let error_text = format!("Cortex chat error: {error}");
@@ -393,4 +417,57 @@ impl CortexChatSession {
             }
         }
     }
+}
+
+// --- Artifact tag parsing ---
+
+/// Parse `<artifact kind="..." title="...">...</artifact>` blocks from a response.
+///
+/// Returns a list of `(artifact_id, kind, title, content)` tuples.
+fn parse_artifact_tags(text: &str) -> Vec<(String, String, String, String)> {
+    let mut results = Vec::new();
+    let mut pos = 0;
+
+    while let Some(rel_start) = text[pos..].find("<artifact") {
+        let start = pos + rel_start;
+
+        // Find the end of the opening tag
+        let Some(rel_tag_end) = text[start..].find('>') else { break };
+        let tag_end = start + rel_tag_end + 1;
+        let tag = &text[start..tag_end];
+
+        let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
+        let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
+
+        // Find the closing tag
+        let Some(rel_close) = text[tag_end..].find("</artifact>") else { break };
+        let content_end = tag_end + rel_close;
+        let content = text[tag_end..content_end].trim().to_string();
+
+        results.push((uuid::Uuid::new_v4().to_string(), kind, title, content));
+        pos = content_end + "</artifact>".len();
+    }
+
+    results
+}
+
+/// Remove all `<artifact>...</artifact>` blocks and return the remainder.
+fn strip_artifact_tags(text: &str) -> String {
+    let mut result = text.to_string();
+
+    loop {
+        let Some(start) = result.find("<artifact") else { break };
+        let Some(rel_close) = result[start..].find("</artifact>") else { break };
+        let end = start + rel_close + "</artifact>".len();
+        result.replace_range(start..end, "");
+    }
+
+    result.trim().to_string()
+}
+
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    let start = tag.find(&pattern)? + pattern.len();
+    let end = tag[start..].find('"')?;
+    Some(tag[start..start + end].to_string())
 }

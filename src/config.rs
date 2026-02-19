@@ -100,6 +100,7 @@ pub struct LlmConfig {
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
     pub zhipu_key: Option<String>,
+    pub zhipu_sub_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
     pub fireworks_key: Option<String>,
@@ -119,6 +120,7 @@ impl LlmConfig {
             || self.openai_key.is_some()
             || self.openrouter_key.is_some()
             || self.zhipu_key.is_some()
+            || self.zhipu_sub_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
             || self.fireworks_key.is_some()
@@ -967,6 +969,7 @@ struct TomlLlmConfig {
     openai_key: Option<String>,
     openrouter_key: Option<String>,
     zhipu_key: Option<String>,
+    zhipu_sub_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
     fireworks_key: Option<String>,
@@ -1340,6 +1343,7 @@ impl Config {
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
+            zhipu_sub_key: std::env::var("ZHIPU_SUB_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
             fireworks_key: std::env::var("FIREWORKS_API_KEY").ok(),
@@ -1440,6 +1444,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
+            zhipu_sub_key: toml
+                .llm
+                .zhipu_sub_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ZHIPU_SUB_API_KEY").ok()),
             groq_key: toml
                 .llm
                 .groq_key

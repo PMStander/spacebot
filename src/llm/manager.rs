@@ -46,6 +46,8 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("openrouter".into()).into()),
             "zhipu" => self.config.zhipu_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("zhipu".into()).into()),
+            "zhipu-sub" => self.config.zhipu_sub_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("zhipu-sub".into()).into()),
             "groq" => self.config.groq_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("groq".into()).into()),
             "together" => self.config.together_key.clone()

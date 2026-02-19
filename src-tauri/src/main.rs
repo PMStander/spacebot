@@ -22,6 +22,16 @@ fn main() {
                     }
                 });
             });
+            // Wait for the HTTP server to be ready before the webview loads.
+            // Without this, the webview opens before the server has bound TCP,
+            // EventSource enters exponential backoff, and SSE events emitted
+            // during that window are dropped (broadcast with no subscribers).
+            for _ in 0..60 {
+                if std::net::TcpStream::connect("127.0.0.1:19898").is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -742,6 +752,7 @@ async fn initialize_agents(
             runtime_config,
             event_tx,
             sqlite_pool: db.sqlite.clone(),
+            messaging_manager: None,
         };
 
         let agent = spacebot::Agent {

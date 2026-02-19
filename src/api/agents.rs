@@ -4,7 +4,8 @@ use crate::agent::cortex::CortexLogger;
 use crate::conversation::channels::ChannelStore;
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
@@ -202,7 +203,6 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    drop(defaults);
 
     for dir in [
         &agent_config.workspace,
@@ -361,19 +361,8 @@ pub(super) async fn create_agent(
     );
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
-    tokio::spawn({
-        let deps = deps.clone();
-        let logger = cortex_logger.clone();
-        async move {
-            crate::agent::cortex::spawn_bulletin_loop(deps, logger).await;
-        }
-    });
-    tokio::spawn({
-        let deps = deps.clone();
-        async move {
-            crate::agent::cortex::spawn_association_loop(deps, cortex_logger).await;
-        }
-    });
+    let _ = crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
+    let _ = crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
 
     let ingestion_config = **runtime_config.ingestion.load();
     if ingestion_config.enabled {
@@ -763,4 +752,89 @@ pub(super) async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
+}
+
+#[derive(Serialize)]
+pub(super) struct AvatarUploadResponse {
+    success: bool,
+}
+
+/// Serve the agent's avatar image.
+pub(super) async fn get_agent_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AgentOverviewQuery>,
+) -> Result<Response, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let profile = crate::agent::cortex::load_profile(pool, &query.agent_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let avatar_path = profile.avatar_path.ok_or(StatusCode::NOT_FOUND)?;
+
+    let data = tokio::fs::read(&avatar_path).await.map_err(|error| {
+        tracing::warn!(%error, path = %avatar_path, "failed to read avatar file");
+        StatusCode::NOT_FOUND
+    })?;
+
+    let mime = mime_guess::from_path(&avatar_path)
+        .first_or_octet_stream()
+        .to_string();
+
+    Ok(([(header::CONTENT_TYPE, mime)], data).into_response())
+}
+
+/// Upload an avatar image for an agent.
+pub(super) async fn upload_agent_avatar(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AgentOverviewQuery>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Json<AvatarUploadResponse>, StatusCode> {
+    let workspaces = state.agent_workspaces.load();
+    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .ok_or(StatusCode::BAD_REQUEST)?;
+
+    let original_name = field
+        .file_name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "avatar.png".to_string());
+
+    let ext = std::path::Path::new(&original_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("png");
+
+    let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let avatar_path = workspace.join(format!("avatar.{ext}"));
+
+    tokio::fs::write(&avatar_path, &data).await.map_err(|error| {
+        tracing::warn!(%error, "failed to write avatar file");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let path_str = avatar_path.to_string_lossy().to_string();
+
+    sqlx::query(
+        "UPDATE agent_profile SET avatar_path = ?, updated_at = datetime('now') WHERE agent_id = ?",
+    )
+    .bind(&path_str)
+    .bind(&query.agent_id)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "failed to update avatar_path in profile");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(AvatarUploadResponse { success: true }))
 }

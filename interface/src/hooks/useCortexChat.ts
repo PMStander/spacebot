@@ -7,6 +7,13 @@ export interface ToolActivity {
 	result_preview?: string;
 }
 
+export interface ArtifactPayload {
+	id: string;
+	kind: string;
+	title: string;
+	content: string;
+}
+
 /** Parse SSE events from a ReadableStream response body. */
 async function consumeSSE(
 	response: Response,
@@ -47,13 +54,19 @@ function generateThreadId(): string {
 	return crypto.randomUUID();
 }
 
-export function useCortexChat(agentId: string, channelId?: string) {
+export function useCortexChat(
+	agentId: string,
+	channelId?: string,
+	onArtifactReceived?: (artifact: ArtifactPayload) => void,
+) {
 	const [messages, setMessages] = useState<CortexChatMessage[]>([]);
 	const [threadId, setThreadId] = useState<string | null>(null);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
 	const loadedRef = useRef(false);
+	// Accumulate artifact content across delta events
+	const pendingArtifactRef = useRef<ArtifactPayload | null>(null);
 
 	// Load latest thread on mount
 	useEffect(() => {
@@ -75,6 +88,7 @@ export function useCortexChat(agentId: string, channelId?: string) {
 		setError(null);
 		setIsStreaming(true);
 		setToolActivity([]);
+		pendingArtifactRef.current = null;
 
 		// Optimistically add user message
 		const userMessage: CortexChatMessage = {
@@ -128,6 +142,33 @@ export function useCortexChat(agentId: string, channelId?: string) {
 					} catch {
 						setError("Failed to parse response");
 					}
+				} else if (eventType === "artifact_start") {
+					try {
+						const parsed = JSON.parse(data);
+						pendingArtifactRef.current = {
+							id: parsed.artifact_id,
+							kind: parsed.kind,
+							title: parsed.title,
+							content: "",
+						};
+					} catch { /* ignore */ }
+				} else if (eventType === "artifact_delta") {
+					try {
+						const parsed = JSON.parse(data);
+						const pending = pendingArtifactRef.current;
+						if (pending && pending.id === parsed.artifact_id) {
+							pendingArtifactRef.current = {
+								...pending,
+								content: pending.content + parsed.data,
+							};
+						}
+					} catch { /* ignore */ }
+				} else if (eventType === "artifact_done") {
+					const artifact = pendingArtifactRef.current;
+					pendingArtifactRef.current = null;
+					if (artifact) {
+						onArtifactReceived?.(artifact);
+					}
 				} else if (eventType === "error") {
 					try {
 						const parsed = JSON.parse(data);
@@ -143,7 +184,7 @@ export function useCortexChat(agentId: string, channelId?: string) {
 			setIsStreaming(false);
 			setToolActivity([]);
 		}
-	}, [agentId, channelId, threadId, isStreaming]);
+	}, [agentId, channelId, threadId, isStreaming, onArtifactReceived]);
 
 	const newThread = useCallback(() => {
 		setThreadId(generateThreadId());

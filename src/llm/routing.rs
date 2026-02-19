@@ -132,6 +132,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         }
         "openai" => RoutingConfig::for_model("openai/gpt-4.1".into()),
         "zhipu" => RoutingConfig::for_model("zhipu/glm-4-plus".into()),
+        "zhipu-sub" => RoutingConfig::for_model("zhipu-sub/glm-5".into()),
         "groq" => RoutingConfig::for_model("groq/llama-3.3-70b-versatile".into()),
         "together" => RoutingConfig::for_model(
             "together/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo".into(),
@@ -155,6 +156,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "openai" => "openai/",
         "anthropic" => "anthropic/",
         "zhipu" => "zhipu/",
+        "zhipu-sub" => "zhipu-sub/",
         "groq" => "groq/",
         "together" => "together/",
         "fireworks" => "fireworks/",

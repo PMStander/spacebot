@@ -4,6 +4,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
 import type { ChannelLiveState, ActiveWorker, ActiveBranch } from "@/hooks/useChannelLiveState";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
+import { ArtifactPanel } from "@/components/ArtifactPanel";
+import { ArtifactSkeleton } from "@/components/ArtifactSkeleton";
+import { useArtifactStore } from "@/hooks/useArtifactStore";
+import { artifactRegistry } from "@/components/artifacts/index";
+import { useCortexChat, type ArtifactPayload } from "@/hooks/useCortexChat";
+import type { UIArtifact, ArtifactKind } from "@/components/create-artifact";
 import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
@@ -217,6 +223,115 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 	}
 }
 
+function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
+	artifact: UIArtifact;
+	agentId: string;
+	channelId: string;
+	onClose: () => void;
+}) {
+	const { metadata, setMetadata, versions, pushVersion } = useArtifactStore();
+	const { sendMessage } = useCortexChat(agentId, channelId);
+	const [versionIndex, setVersionIndex] = useState(versions.length > 0 ? versions.length - 1 : 0);
+	const [mode, setMode] = useState<"view" | "diff">("view");
+
+	const artifactDef = artifactRegistry.get(artifact.kind);
+
+	// Seed the version history with the current artifact content on open
+	useEffect(() => {
+		if (versions.length === 0) {
+			pushVersion(artifact.content);
+		}
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [artifact.id]);
+
+	// Run artifact-type initialization (sets up initial metadata)
+	useEffect(() => {
+		if (artifactDef) {
+			artifactDef.initialize({ artifactId: artifact.id, setMetadata });
+		}
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [artifact.id, artifactDef]);
+
+	const handleVersionChange = useCallback((type: "next" | "prev" | "toggle" | "latest") => {
+		if (type === "prev") setVersionIndex((i) => Math.max(0, i - 1));
+		else if (type === "next") setVersionIndex((i) => Math.min(versions.length - 1, i + 1));
+		else if (type === "toggle") setMode((m) => (m === "diff" ? "view" : "diff"));
+		else if (type === "latest") setVersionIndex(versions.length - 1);
+	}, [versions.length]);
+
+	const handleSaveContent = useCallback((updated: string, _debounce: boolean) => {
+		pushVersion(updated);
+	}, [pushVersion]);
+
+	const getVersionContentById = useCallback((index: number): string => {
+		return versions[index] ?? artifact.content;
+	}, [versions, artifact.content]);
+
+	const actionContext = {
+		content: artifact.content,
+		handleVersionChange,
+		currentVersionIndex: versionIndex,
+		isCurrentVersion: versionIndex === versions.length - 1 || versions.length === 0,
+		mode,
+		metadata: metadata ?? {},
+		setMetadata,
+	};
+
+	const toolbarContext = { sendMessage };
+
+	const actions = artifactDef?.actions.map((action, i) => (
+		<button
+			key={i}
+			title={action.description}
+			disabled={action.isDisabled?.(actionContext) ?? false}
+			onClick={() => action.onClick(actionContext)}
+			className="flex h-7 w-7 items-center justify-center rounded text-ink-faint hover:bg-app-line/50 hover:text-ink disabled:opacity-40"
+		>
+			{action.icon}
+		</button>
+	));
+
+	const toolbar = artifactDef?.toolbar.map((item, i) => (
+		<button
+			key={i}
+			title={item.description}
+			onClick={() => item.onClick(toolbarContext)}
+			className="flex h-7 items-center gap-1.5 rounded px-2 text-tiny text-ink-faint hover:bg-app-line/50 hover:text-ink"
+		>
+			{item.icon}
+			<span>{item.description}</span>
+		</button>
+	));
+
+	if (!artifactDef) {
+		return (
+			<ArtifactPanel title={artifact.title} onClose={onClose} agentId={agentId}>
+				<ArtifactSkeleton />
+			</ArtifactPanel>
+		);
+	}
+
+	const ContentComponent = artifactDef.content;
+
+	return (
+		<ArtifactPanel title={artifact.title} onClose={onClose} agentId={agentId} actions={<>{actions}</>} toolbar={toolbar && <>{toolbar}</>}>
+			<ContentComponent
+				title={artifact.title}
+				content={artifact.content}
+				mode={mode}
+				isCurrentVersion={versionIndex === versions.length - 1 || versions.length === 0}
+				currentVersionIndex={versionIndex}
+				status={artifact.status}
+				onSaveContent={handleSaveContent}
+				isLoading={false}
+				metadata={metadata ?? {}}
+				setMetadata={setMetadata}
+				getVersionContentById={getVersionContentById}
+			/>
+		</ArtifactPanel>
+	);
+}
+
 export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMore }: ChannelDetailProps) {
 	const timeline = liveState?.timeline ?? [];
 	const hasMore = liveState?.hasMore ?? false;
@@ -227,7 +342,31 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const activeWorkerCount = Object.keys(workers).length;
 	const activeBranchCount = Object.keys(branches).length;
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
-	const [cortexOpen, setCortexOpen] = useState(true);
+	type PanelKind = "closed" | "cortex" | "artifact";
+	const [panelKind, setPanelKind] = useState<PanelKind>("cortex");
+	const { artifact, clearArtifact } = useArtifactStore();
+
+	// Open an artifact in the split-screen panel (from timeline clicks or cortex chat)
+	const openArtifact = useCallback((art: UIArtifact) => {
+		useArtifactStore.getState().clearArtifact();
+		useArtifactStore.getState().setArtifact(art);
+		setPanelKind("artifact");
+	}, []);
+
+	// Called when cortex chat emits an artifact_done event
+	const handleArtifactFromCortex = useCallback((payload: ArtifactPayload) => {
+		openArtifact({
+			id: payload.id,
+			channelId,
+			kind: payload.kind as ArtifactKind,
+			title: payload.title,
+			content: payload.content,
+			metadata: null,
+			version: 1,
+			status: "idle",
+			isVisible: true,
+		});
+	}, [channelId, openArtifact]);
 
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -249,6 +388,42 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 		observer.observe(sentinel);
 		return () => observer.disconnect();
 	}, [handleIntersection]);
+
+	// Full split-screen when artifact is open: cortex (400px left) + artifact (flex-1 right)
+	if (panelKind === "artifact" && artifact) {
+		return (
+			<div className="flex h-full">
+				<motion.div
+					initial={{ width: 0, opacity: 0 }}
+					animate={{ width: 400, opacity: 1 }}
+					transition={{ type: "spring", stiffness: 400, damping: 30 }}
+					className="flex-shrink-0 overflow-hidden border-r border-app-line/50"
+				>
+					<div className="h-full w-[400px]">
+						<CortexChatPanel
+							agentId={agentId}
+							channelId={channelId}
+							onClose={() => { clearArtifact(); setPanelKind("closed"); }}
+							onArtifactReceived={handleArtifactFromCortex}
+						/>
+					</div>
+				</motion.div>
+				<motion.div
+					initial={{ opacity: 0, x: 20 }}
+					animate={{ opacity: 1, x: 0 }}
+					transition={{ type: "spring", stiffness: 300, damping: 30, delay: 0.05 }}
+					className="min-w-0 flex-1 overflow-hidden border-l border-app-line/50"
+				>
+					<ArtifactPanelRenderer
+						artifact={artifact}
+						agentId={agentId}
+						channelId={channelId}
+						onClose={() => { clearArtifact(); setPanelKind("cortex"); }}
+					/>
+				</motion.div>
+			</div>
+		);
+	}
 
 	return (
 		<div className="flex h-full">
@@ -304,10 +479,10 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 							</div>
 						)}
 					<Button
-						onClick={() => setCortexOpen(!cortexOpen)}
-						variant={cortexOpen ? "secondary" : "ghost"}
+						onClick={() => setPanelKind(panelKind === "cortex" ? "closed" : "cortex")}
+						variant={panelKind === "cortex" ? "secondary" : "ghost"}
 						size="icon"
-						className={`h-8 w-8 ${cortexOpen ? "bg-violet-500/20 text-violet-400" : ""}`}
+						className={`h-8 w-8 ${panelKind === "cortex" ? "bg-violet-500/20 text-violet-400" : ""}`}
 						title="Toggle cortex chat"
 					>
 						<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
@@ -360,9 +535,9 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 				</div>
 			</div>
 
-			{/* Cortex chat panel */}
+			{/* Cortex panel (artifact split-screen is rendered separately above) */}
 			<AnimatePresence>
-				{cortexOpen && (
+				{panelKind === "cortex" && (
 					<motion.div
 						initial={{ width: 0, opacity: 0 }}
 						animate={{ width: 400, opacity: 1 }}
@@ -374,7 +549,8 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 							<CortexChatPanel
 								agentId={agentId}
 								channelId={channelId}
-								onClose={() => setCortexOpen(false)}
+								onClose={() => setPanelKind("closed")}
+								onArtifactReceived={handleArtifactFromCortex}
 							/>
 						</div>
 					</motion.div>

@@ -31,6 +31,7 @@ export function platformIcon(platform: string): string {
 		case "telegram": return "Telegram";
 		case "webhook": return "Webhook";
 		case "cron": return "Cron";
+		case "internal": return "Chat";
 		default: return platform;
 	}
 }
@@ -41,6 +42,7 @@ export function platformColor(platform: string): string {
 		case "slack": return "bg-green-500/20 text-green-400";
 		case "telegram": return "bg-blue-500/20 text-blue-400";
 		case "cron": return "bg-amber-500/20 text-amber-400";
+		case "internal": return "bg-purple-500/20 text-purple-400";
 		default: return "bg-gray-500/20 text-gray-400";
 	}
 }

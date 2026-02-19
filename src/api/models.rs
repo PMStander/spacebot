@@ -267,6 +267,7 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("openai_key", "OPENAI_API_KEY") { providers.push("openai"); }
     if has_key("openrouter_key", "OPENROUTER_API_KEY") { providers.push("openrouter"); }
     if has_key("zhipu_key", "ZHIPU_API_KEY") { providers.push("zhipu"); }
+    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") { providers.push("zhipu-sub"); }
     if has_key("groq_key", "GROQ_API_KEY") { providers.push("groq"); }
     if has_key("together_key", "TOGETHER_API_KEY") { providers.push("together"); }
     if has_key("fireworks_key", "FIREWORKS_API_KEY") { providers.push("fireworks"); }

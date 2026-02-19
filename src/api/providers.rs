@@ -12,6 +12,7 @@ pub(super) struct ProviderStatus {
     openai: bool,
     openrouter: bool,
     zhipu: bool,
+    zhipu_sub: bool,
     groq: bool,
     together: bool,
     fireworks: bool,
@@ -44,7 +45,7 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
+    let (anthropic, openai, openrouter, zhipu, zhipu_sub, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -71,6 +72,7 @@ pub(super) async fn get_providers(
             has_key("openai_key", "OPENAI_API_KEY"),
             has_key("openrouter_key", "OPENROUTER_API_KEY"),
             has_key("zhipu_key", "ZHIPU_API_KEY"),
+            has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
             has_key("groq_key", "GROQ_API_KEY"),
             has_key("together_key", "TOGETHER_API_KEY"),
             has_key("fireworks_key", "FIREWORKS_API_KEY"),
@@ -85,6 +87,7 @@ pub(super) async fn get_providers(
             std::env::var("OPENAI_API_KEY").is_ok(),
             std::env::var("OPENROUTER_API_KEY").is_ok(),
             std::env::var("ZHIPU_API_KEY").is_ok(),
+            std::env::var("ZHIPU_SUB_API_KEY").is_ok(),
             std::env::var("GROQ_API_KEY").is_ok(),
             std::env::var("TOGETHER_API_KEY").is_ok(),
             std::env::var("FIREWORKS_API_KEY").is_ok(),
@@ -100,6 +103,7 @@ pub(super) async fn get_providers(
         openai,
         openrouter,
         zhipu,
+        zhipu_sub,
         groq,
         together,
         fireworks,
@@ -112,6 +116,7 @@ pub(super) async fn get_providers(
         || providers.openai
         || providers.openrouter
         || providers.zhipu
+        || providers.zhipu_sub
         || providers.groq
         || providers.together
         || providers.fireworks
@@ -132,6 +137,7 @@ pub(super) async fn update_provider(
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
         "zhipu" => "zhipu_key",
+        "zhipu-sub" => "zhipu_sub_key",
         "groq" => "groq_key",
         "together" => "together_key",
         "fireworks" => "fireworks_key",
@@ -201,6 +207,7 @@ pub(super) async fn update_provider(
             "openai" => has_provider_key("openai_key", "OPENAI_API_KEY"),
             "openrouter" => has_provider_key("openrouter_key", "OPENROUTER_API_KEY"),
             "zhipu" => has_provider_key("zhipu_key", "ZHIPU_API_KEY"),
+            "zhipu-sub" => has_provider_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
             "groq" => has_provider_key("groq_key", "GROQ_API_KEY"),
             "together" => has_provider_key("together_key", "TOGETHER_API_KEY"),
             "fireworks" => has_provider_key("fireworks_key", "FIREWORKS_API_KEY"),
@@ -266,6 +273,7 @@ pub(super) async fn delete_provider(
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
         "zhipu" => "zhipu_key",
+        "zhipu-sub" => "zhipu_sub_key",
         "groq" => "groq_key",
         "together" => "together_key",
         "fireworks" => "fireworks_key",
