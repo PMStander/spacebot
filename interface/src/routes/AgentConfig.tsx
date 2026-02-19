@@ -381,10 +381,10 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 	// Nested objects for routing: task_overrides and fallbacks
 	const [taskOverrides, setTaskOverrides] = useState<Record<string, string>>(
-		() => sectionId === "routing" ? { ...config.routing.task_overrides } : {}
+		() => sectionId === "routing" ? { ...(config.routing.task_overrides ?? {}) } : {}
 	);
 	const [fallbacks, setFallbacks] = useState<Record<string, string[]>>(
-		() => sectionId === "routing" ? structuredClone(config.routing.fallbacks) : {}
+		() => sectionId === "routing" ? structuredClone(config.routing.fallbacks ?? {}) : {}
 	);
 
 	const [localDirty, setLocalDirty] = useState(false);
@@ -445,8 +445,8 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 			case "routing": {
 				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
 				setLocalValues({ ...flat });
-				setTaskOverrides({ ...config.routing.task_overrides });
-				setFallbacks(structuredClone(config.routing.fallbacks));
+				setTaskOverrides({ ...(config.routing.task_overrides ?? {}) });
+				setFallbacks(structuredClone(config.routing.fallbacks ?? {}));
 				break;
 			}
 			case "tuning":
