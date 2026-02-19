@@ -355,9 +355,9 @@ impl CortexChatSession {
             None
         };
 
-        // Render skills so the cortex knows what skills are available for workers
+        // Render skills so the cortex can execute them directly with its own tools
         let skills = runtime_config.skills.load();
-        let skills_rendered = skills.render_channel_prompt(&prompt_engine);
+        let skills_rendered = skills.render_cortex_prompt(&prompt_engine);
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 

@@ -135,6 +135,32 @@ impl SkillSet {
             .expect("failed to render skills channel prompt")
     }
 
+    /// Render the skills summary for injection into the cortex chat system prompt.
+    ///
+    /// The cortex executes skills directly using its own tools (exec, shell, file)
+    /// rather than delegating to workers.
+    pub fn render_cortex_prompt(&self, prompt_engine: &crate::prompts::PromptEngine) -> String {
+        if self.skills.is_empty() {
+            return String::new();
+        }
+
+        let mut sorted_skills: Vec<&Skill> = self.skills.values().collect();
+        sorted_skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let skill_infos: Vec<crate::prompts::SkillInfo> = sorted_skills
+            .into_iter()
+            .map(|s| crate::prompts::SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                location: s.file_path.display().to_string(),
+            })
+            .collect();
+
+        prompt_engine
+            .render_skills_cortex(skill_infos)
+            .expect("failed to render cortex skills prompt")
+    }
+
     /// Render the skills section for injection into a worker system prompt.
     ///
     /// Workers get the full skill content so they can follow the instructions

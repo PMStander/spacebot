@@ -73,6 +73,10 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/skills_worker"),
         )?;
         env.add_template(
+            "fragments/skills_cortex",
+            crate::prompts::text::get("fragments/skills_cortex"),
+        )?;
+        env.add_template(
             "fragments/available_channels",
             crate::prompts::text::get("fragments/available_channels"),
         )?;
@@ -204,6 +208,18 @@ impl PromptEngine {
     pub fn render_skills_channel(&self, skills: Vec<SkillInfo>) -> Result<String> {
         self.render(
             "fragments/skills_channel",
+            context! {
+                skills => skills,
+            },
+        )
+    }
+
+    /// Convenience method for rendering skills cortex fragment.
+    /// Unlike the channel fragment, this instructs the cortex to execute skills
+    /// directly using its own tools rather than spawning a worker.
+    pub fn render_skills_cortex(&self, skills: Vec<SkillInfo>) -> Result<String> {
+        self.render(
+            "fragments/skills_cortex",
             context! {
                 skills => skills,
             },

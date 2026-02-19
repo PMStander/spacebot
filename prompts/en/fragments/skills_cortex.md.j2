@@ -1,0 +1,15 @@
+## Available Skills
+
+You have access to the following skills. Skills contain specialized instructions for specific tasks.
+When a user's request matches a skill, read the SKILL.md file at the skill's location and follow
+its instructions directly using your exec, shell, and file tools.
+
+<available_skills>
+{%- for skill in skills %}
+  <skill>
+    <name>{{ skill.name }}</name>
+    <description>{{ skill.description }}</description>
+    <location>{{ skill.location }}</location>
+  </skill>
+{%- endfor %}
+</available_skills>
