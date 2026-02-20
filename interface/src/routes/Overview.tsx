@@ -307,6 +307,14 @@ function AgentCard({
 	};
 
 	return (
+		<>
+		<input
+			ref={fileInputRef}
+			type="file"
+			accept="image/*"
+			className="hidden"
+			onChange={handleAvatarUpload}
+		/>
 		<Link
 			to="/agents/$agentId"
 			params={{ agentId: agent.id }}
@@ -358,13 +366,6 @@ function AgentCard({
 							isActive ? "bg-green-500" : "bg-gray-500"
 						}`}
 					/>
-					<input
-						ref={fileInputRef}
-						type="file"
-						accept="image/*"
-						className="hidden"
-						onChange={handleAvatarUpload}
-					/>
 				</div>
 			</div>
 
@@ -413,6 +414,7 @@ function AgentCard({
 				)}
 			</div>
 		</Link>
+		</>
 	);
 }
 

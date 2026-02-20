@@ -1,25 +1,28 @@
 //! Channel: User-facing conversation process.
 
+use crate::agent::branch::Branch;
 use crate::agent::compactor::Compactor;
-use crate::error::{AgentError, Result};
-use crate::llm::SpacebotModel;
-use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
-use crate::{ChannelId, WorkerId, BranchId, ProcessId, ProcessType, AgentDeps, InboundMessage, ProcessEvent, OutboundResponse};
-use crate::hooks::SpacebotHook;
 use crate::agent::status::StatusBlock;
 use crate::agent::worker::Worker;
-use crate::agent::branch::Branch;
+use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
+use crate::error::{AgentError, Result};
+use crate::hooks::SpacebotHook;
+use crate::llm::SpacebotModel;
+use crate::{
+    AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
+    ProcessType, WorkerId,
+};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use rig::message::{ImageMediaType, MimeType, UserContent};
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast;
+use tokio::sync::{RwLock, mpsc};
 use tracing::Instrument as _;
-use std::collections::HashMap;
 
 /// Shared state that channel tools need to act on the channel.
 ///
@@ -50,7 +53,12 @@ impl ChannelState {
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
         let handle = self.worker_handles.write().await.remove(&worker_id);
-        let removed = self.active_workers.write().await.remove(&worker_id).is_some();
+        let removed = self
+            .active_workers
+            .write()
+            .await
+            .remove(&worker_id)
+            .is_some();
         self.worker_inputs.write().await.remove(&worker_id);
 
         if let Some(handle) = handle {
@@ -133,7 +141,13 @@ impl Channel {
         logs_dir: std::path::PathBuf,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, Some(id.clone()), deps.event_tx.clone());
+        let hook = SpacebotHook::new(
+            deps.agent_id.clone(),
+            process_id,
+            ProcessType::Channel,
+            Some(id.clone()),
+            deps.event_tx.clone(),
+        );
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
@@ -144,11 +158,7 @@ impl Channel {
         let process_run_logger = ProcessRunLogger::new(deps.sqlite_pool.clone());
         let channel_store = ChannelStore::new(deps.sqlite_pool.clone());
 
-        let compactor = Compactor::new(
-            id.clone(),
-            deps.clone(),
-            history.clone(),
-        );
+        let compactor = Compactor::new(id.clone(), deps.clone(), history.clone());
 
         let state = ChannelState {
             channel_id: id.clone(),
@@ -168,7 +178,25 @@ impl Channel {
 
         // Each channel gets its own isolated tool server to avoid races between
         // concurrent channels sharing per-turn add/remove cycles.
-        let tool_server = ToolServer::new().run();
+        // Canvas tools are added at creation time (persistent, not per-turn).
+        let tool_server = {
+            let mut server = ToolServer::new();
+            if let Some(ref api_tx) = deps.api_event_tx {
+                server = server
+                    .tool(crate::tools::CanvasSetTool::new(
+                        deps.sqlite_pool.clone(),
+                        deps.agent_id.to_string(),
+                        api_tx.clone(),
+                    ))
+                    .tool(crate::tools::CanvasRemoveTool::new(
+                        deps.sqlite_pool.clone(),
+                        deps.agent_id.to_string(),
+                        api_tx.clone(),
+                    ))
+                    .tool(crate::tools::CanvasListTool::new(deps.sqlite_pool.clone()));
+            }
+            server.run()
+        };
 
         let self_tx = message_tx.clone();
         let channel = Self {
@@ -190,10 +218,10 @@ impl Channel {
             coalesce_buffer: Vec::new(),
             coalesce_deadline: None,
         };
-        
+
         (channel, message_tx)
     }
-    
+
     /// Run the channel event loop.
     pub async fn run(mut self) -> Result<()> {
         tracing::info!(channel_id = %self.id, "channel started");
@@ -262,7 +290,11 @@ impl Channel {
     /// - System re-trigger messages (always process immediately)
     /// - Messages when coalescing is disabled
     /// - Messages in DMs when multi_user_only is true
-    fn should_coalesce(&self, message: &InboundMessage, config: &crate::config::CoalesceConfig) -> bool {
+    fn should_coalesce(
+        &self,
+        message: &InboundMessage,
+        config: &crate::config::CoalesceConfig,
+    ) -> bool {
         if !config.enabled {
             return false;
         }
@@ -279,7 +311,9 @@ impl Channel {
     fn is_dm(&self) -> bool {
         // Check conversation_id pattern for DM indicators
         if let Some(ref conv_id) = self.conversation_id {
-            conv_id.contains(":dm:") || conv_id.starts_with("discord:dm:") || conv_id.starts_with("slack:dm:")
+            conv_id.contains(":dm:")
+                || conv_id.starts_with("discord:dm:")
+                || conv_id.starts_with("slack:dm:")
         } else {
             // If no conversation_id set yet, default to not DM (safer)
             false
@@ -289,20 +323,21 @@ impl Channel {
     /// Update the coalesce deadline based on buffer size and config.
     async fn update_coalesce_deadline(&mut self, config: &crate::config::CoalesceConfig) {
         let now = tokio::time::Instant::now();
-        
+
         if let Some(first_message) = self.coalesce_buffer.first() {
-            let elapsed_since_first = chrono::Utc::now().signed_duration_since(first_message.timestamp);
+            let elapsed_since_first =
+                chrono::Utc::now().signed_duration_since(first_message.timestamp);
             let elapsed_millis = elapsed_since_first.num_milliseconds().max(0) as u64;
-            
+
             let max_wait_ms = config.max_wait_ms;
             let debounce_ms = config.debounce_ms;
-            
+
             // If we have enough messages to trigger coalescing (min_messages threshold)
             if self.coalesce_buffer.len() >= config.min_messages {
                 // Cap at max_wait from the first message
                 let remaining_wait_ms = max_wait_ms.saturating_sub(elapsed_millis);
                 let max_deadline = now + std::time::Duration::from_millis(remaining_wait_ms);
-                
+
                 // If no deadline set yet, use debounce window
                 // Otherwise, keep existing deadline (don't extend past max_wait)
                 if self.coalesce_deadline.is_none() {
@@ -328,11 +363,11 @@ impl Channel {
         if self.coalesce_buffer.is_empty() {
             return Ok(());
         }
-        
+
         self.coalesce_deadline = None;
-        
+
         let messages: Vec<InboundMessage> = std::mem::take(&mut self.coalesce_buffer);
-        
+
         if messages.len() == 1 {
             // Single message - process normally
             let message = messages.into_iter().next().unwrap();
@@ -351,40 +386,60 @@ impl Channel {
     #[tracing::instrument(skip(self, messages), fields(channel_id = %self.id, agent_id = %self.deps.agent_id, message_count = messages.len()))]
     async fn handle_message_batch(&mut self, messages: Vec<InboundMessage>) -> Result<()> {
         let message_count = messages.len();
-        let first_timestamp = messages.first().map(|m| m.timestamp).unwrap_or_else(chrono::Utc::now);
-        let last_timestamp = messages.last().map(|m| m.timestamp).unwrap_or(first_timestamp);
+        let first_timestamp = messages
+            .first()
+            .map(|m| m.timestamp)
+            .unwrap_or_else(chrono::Utc::now);
+        let last_timestamp = messages
+            .last()
+            .map(|m| m.timestamp)
+            .unwrap_or(first_timestamp);
         let elapsed = last_timestamp.signed_duration_since(first_timestamp);
         let elapsed_secs = elapsed.num_milliseconds() as f64 / 1000.0;
-        
+
         tracing::info!(
             channel_id = %self.id,
             message_count,
             elapsed_secs,
             "handling batched messages"
         );
-        
+
         // Count unique senders for the hint
-        let unique_senders: std::collections::HashSet<_> = messages
-            .iter()
-            .map(|m| &m.sender_id)
-            .collect();
+        let unique_senders: std::collections::HashSet<_> =
+            messages.iter().map(|m| &m.sender_id).collect();
         let unique_sender_count = unique_senders.len();
-        
+
         // Track conversation_id from the first message
         if self.conversation_id.is_none() {
             if let Some(first) = messages.first() {
                 self.conversation_id = Some(first.conversation_id.clone());
             }
         }
-        
+
         // Capture conversation context from the first message
         if self.conversation_context.is_none() {
             if let Some(first) = messages.first() {
                 let prompt_engine = self.deps.runtime_config.prompts.load();
-                let server_name = first.metadata.get("discord_guild_name").and_then(|v| v.as_str())
-                    .or_else(|| first.metadata.get("telegram_chat_title").and_then(|v| v.as_str()));
-                let channel_name = first.metadata.get("discord_channel_name").and_then(|v| v.as_str())
-                    .or_else(|| first.metadata.get("telegram_chat_type").and_then(|v| v.as_str()));
+                let server_name = first
+                    .metadata
+                    .get("discord_guild_name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        first
+                            .metadata
+                            .get("telegram_chat_title")
+                            .and_then(|v| v.as_str())
+                    });
+                let channel_name = first
+                    .metadata
+                    .get("discord_channel_name")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        first
+                            .metadata
+                            .get("telegram_chat_type")
+                            .and_then(|v| v.as_str())
+                    });
                 self.conversation_context = Some(
                     prompt_engine
                         .render_conversation_context(&first.source, server_name, channel_name)
@@ -392,18 +447,19 @@ impl Channel {
                 );
             }
         }
-        
+
         // Persist each message to conversation log (individual audit trail)
         let mut user_contents: Vec<UserContent> = Vec::new();
         let mut conversation_id = String::new();
-        
+
         for message in &messages {
             if message.source != "system" {
-                let sender_name = message.metadata
+                let sender_name = message
+                    .metadata
                     .get("sender_display_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&message.sender_id);
-                
+
                 let (raw_text, attachments) = match &message.content {
                     crate::MessageContent::Text(text) => (text.clone(), Vec::new()),
                     crate::MessageContent::Media { text, attachments } => {
@@ -414,7 +470,7 @@ impl Channel {
                         (message.content.to_string(), Vec::new())
                     }
                 };
-                
+
                 self.state.conversation_logger.log_user_message(
                     &self.state.channel_id,
                     sender_name,
@@ -422,15 +478,17 @@ impl Channel {
                     &raw_text,
                     &message.metadata,
                 );
-                self.state.channel_store.upsert(
-                    &message.conversation_id,
-                    &message.metadata,
-                );
-                
+                self.state
+                    .channel_store
+                    .upsert(&message.conversation_id, &message.metadata);
+
                 conversation_id = message.conversation_id.clone();
-                
+
                 // Format with relative timestamp
-                let relative_secs = message.timestamp.signed_duration_since(first_timestamp).num_seconds();
+                let relative_secs = message
+                    .timestamp
+                    .signed_duration_since(first_timestamp)
+                    .num_seconds();
                 let relative_text = if relative_secs < 1 {
                     "just now".to_string()
                 } else if relative_secs < 60 {
@@ -438,14 +496,16 @@ impl Channel {
                 } else {
                     format!("{}m ago", relative_secs / 60)
                 };
-                
-                let display_name = message.metadata
+
+                let display_name = message
+                    .metadata
                     .get("sender_display_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or(&message.sender_id);
-                
-                let formatted_text = format!("[{}] ({}): {}", display_name, relative_text, raw_text);
-                
+
+                let formatted_text =
+                    format!("[{}] ({}): {}", display_name, relative_text, raw_text);
+
                 // Download attachments for this message
                 if !attachments.is_empty() {
                     let attachment_content = download_attachments(&self.deps, &attachments).await;
@@ -453,16 +513,17 @@ impl Channel {
                         user_contents.push(content);
                     }
                 }
-                
+
                 user_contents.push(UserContent::text(formatted_text));
             }
         }
-        
+
         // Combine all user content into a single text
         let combined_text = format!(
             "[{} messages arrived rapidly in this channel]\n\n{}",
             message_count,
-            user_contents.iter()
+            user_contents
+                .iter()
                 .filter_map(|c| match c {
                     UserContent::Text(t) => Some(t.text.clone()),
                     _ => None,
@@ -470,33 +531,33 @@ impl Channel {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
-        
+
         // Build system prompt with coalesce hint
-        let system_prompt = self.build_system_prompt_with_coalesce(
-            message_count,
-            elapsed_secs,
-            unique_sender_count,
-        ).await;
-        
+        let system_prompt = self
+            .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
+            .await;
+
         // Run agent turn
-        let (result, skip_flag) = self.run_agent_turn(
-            &combined_text,
-            &system_prompt,
-            &conversation_id,
-            Vec::new(), // Attachments already formatted into text
-        ).await?;
-        
+        let (result, skip_flag) = self
+            .run_agent_turn(
+                &combined_text,
+                &system_prompt,
+                &conversation_id,
+                Vec::new(), // Attachments already formatted into text
+            )
+            .await?;
+
         self.handle_agent_result(result, &skip_flag).await;
-        
+
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
         }
-        
+
         // Increment message counter for memory persistence
         self.message_count += message_count;
         self.check_memory_persistence().await;
-        
+
         Ok(())
     }
 
@@ -509,34 +570,34 @@ impl Channel {
     ) -> String {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
-        
+
         let identity_context = rc.identity.load().render();
         let memory_bulletin = rc.memory_bulletin.load();
         let skills = rc.skills.load();
         let skills_prompt = skills.render_channel_prompt(&prompt_engine);
-        
+
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let worker_capabilities = prompt_engine
             .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
             .expect("failed to render worker capabilities");
-        
+
         let status_text = {
             let status = self.state.status_block.read().await;
             status.render()
         };
-        
+
         // Render coalesce hint
         let elapsed_str = format!("{:.1}s", elapsed_secs);
         let coalesce_hint = prompt_engine
             .render_coalesce_hint(message_count, &elapsed_str, unique_senders)
             .ok();
-        
+
         let available_channels = self.build_available_channels().await;
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
-        
+
         prompt_engine
             .render_channel_prompt(
                 empty_to_none(identity_context),
@@ -568,16 +629,14 @@ impl Channel {
         if self.conversation_id.is_none() {
             self.conversation_id = Some(message.conversation_id.clone());
         }
-        
+
         let (raw_text, attachments) = match &message.content {
             crate::MessageContent::Text(text) => (text.clone(), Vec::new()),
             crate::MessageContent::Media { text, attachments } => {
                 (text.clone().unwrap_or_default(), attachments.clone())
             }
             // Render interactions as their Display form so the LLM sees plain text.
-            crate::MessageContent::Interaction { .. } => {
-                (message.content.to_string(), Vec::new())
-            }
+            crate::MessageContent::Interaction { .. } => (message.content.to_string(), Vec::new()),
         };
 
         let user_text = format_user_message(&raw_text, &message);
@@ -590,7 +649,8 @@ impl Channel {
 
         // Persist user messages (skip system re-triggers)
         if message.source != "system" {
-            let sender_name = message.metadata
+            let sender_name = message
+                .metadata
                 .get("sender_display_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or(&message.sender_id);
@@ -601,19 +661,34 @@ impl Channel {
                 &raw_text,
                 &message.metadata,
             );
-            self.state.channel_store.upsert(
-                &message.conversation_id,
-                &message.metadata,
-            );
+            self.state
+                .channel_store
+                .upsert(&message.conversation_id, &message.metadata);
         }
 
         // Capture conversation context from the first message (platform, channel, server)
         if self.conversation_context.is_none() {
             let prompt_engine = self.deps.runtime_config.prompts.load();
-            let server_name = message.metadata.get("discord_guild_name").and_then(|v| v.as_str())
-                .or_else(|| message.metadata.get("telegram_chat_title").and_then(|v| v.as_str()));
-            let channel_name = message.metadata.get("discord_channel_name").and_then(|v| v.as_str())
-                .or_else(|| message.metadata.get("telegram_chat_type").and_then(|v| v.as_str()));
+            let server_name = message
+                .metadata
+                .get("discord_guild_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    message
+                        .metadata
+                        .get("telegram_chat_title")
+                        .and_then(|v| v.as_str())
+                });
+            let channel_name = message
+                .metadata
+                .get("discord_channel_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    message
+                        .metadata
+                        .get("telegram_chat_type")
+                        .and_then(|v| v.as_str())
+                });
             self.conversation_context = Some(
                 prompt_engine
                     .render_conversation_context(&message.source, server_name, channel_name)
@@ -623,12 +698,14 @@ impl Channel {
 
         let system_prompt = self.build_system_prompt().await;
 
-        let (result, skip_flag) = self.run_agent_turn(
-            &user_text,
-            &system_prompt,
-            &message.conversation_id,
-            attachment_content,
-        ).await?;
+        let (result, skip_flag) = self
+            .run_agent_turn(
+                &user_text,
+                &system_prompt,
+                &message.conversation_id,
+                attachment_content,
+            )
+            .await?;
 
         self.handle_agent_result(result, &skip_flag).await;
 
@@ -642,7 +719,7 @@ impl Channel {
             self.message_count += 1;
             self.check_memory_persistence().await;
         }
-        
+
         Ok(())
     }
 
@@ -669,9 +746,7 @@ impl Channel {
                     && channel.platform != "webhook"
             })
             .map(|channel| crate::prompts::engine::ChannelEntry {
-                name: channel
-                    .display_name
-                    .unwrap_or_else(|| channel.id.clone()),
+                name: channel.display_name.unwrap_or_else(|| channel.id.clone()),
                 platform: channel.platform,
                 id: channel.id,
             })
@@ -735,7 +810,10 @@ impl Channel {
         system_prompt: &str,
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
-    ) -> Result<(std::result::Result<String, rig::completion::PromptError>, crate::tools::SkipFlag)> {
+    ) -> Result<(
+        std::result::Result<String, rig::completion::PromptError>,
+        crate::tools::SkipFlag,
+    )> {
         let skip_flag = crate::tools::new_skip_flag();
 
         if let Err(error) = crate::tools::add_channel_tools(
@@ -745,7 +823,9 @@ impl Channel {
             conversation_id,
             skip_flag.clone(),
             self.deps.cron_tool.clone(),
-        ).await {
+        )
+        .await
+        {
             tracing::error!(%error, "failed to add channel tools");
             return Err(AgentError::Other(error.into()).into());
         }
@@ -763,13 +843,17 @@ impl Channel {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let _ = self.response_tx.send(OutboundResponse::Status(crate::StatusUpdate::Thinking)).await;
+        let _ = self
+            .response_tx
+            .send(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+            .await;
 
         // Inject attachments as a user message before the text prompt
         if !attachment_content.is_empty() {
             let mut history = self.state.history.write().await;
-            let content = OneOrMany::many(attachment_content)
-                .unwrap_or_else(|_| OneOrMany::one(UserContent::text("[attachment processing failed]")));
+            let content = OneOrMany::many(attachment_content).unwrap_or_else(|_| {
+                OneOrMany::one(UserContent::text("[attachment processing failed]"))
+            });
             history.push(rig::message::Message::User { content });
             drop(history);
         }
@@ -782,7 +866,8 @@ impl Channel {
             guard.clone()
         };
 
-        let mut result = agent.prompt(user_text)
+        let mut result = agent
+            .prompt(user_text)
             .with_history(&mut history)
             .with_hook(self.hook.clone())
             .await;
@@ -794,7 +879,8 @@ impl Channel {
                 tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
                 let prompt_engine = self.deps.runtime_config.prompts.load();
                 let correction = prompt_engine.render_system_tool_syntax_correction()?;
-                result = agent.prompt(&correction)
+                result = agent
+                    .prompt(&correction)
                     .with_history(&mut history)
                     .with_hook(self.hook.clone())
                     .await;
@@ -838,8 +924,14 @@ impl Channel {
                         if extracted.is_some() {
                             tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                         }
-                        self.state.conversation_logger.log_bot_message(&self.state.channel_id, final_text);
-                        if let Err(error) = self.response_tx.send(OutboundResponse::Text(final_text.to_string())).await {
+                        self.state
+                            .conversation_logger
+                            .log_bot_message(&self.state.channel_id, final_text);
+                        if let Err(error) = self
+                            .response_tx
+                            .send(OutboundResponse::Text(final_text.to_string()))
+                            .await
+                        {
                             tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                         }
                     }
@@ -859,9 +951,12 @@ impl Channel {
         }
 
         // Ensure typing indicator is always cleaned up, even on error paths
-        let _ = self.response_tx.send(OutboundResponse::Status(crate::StatusUpdate::StopTyping)).await;
+        let _ = self
+            .response_tx
+            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .await;
     }
-    
+
     /// Handle a process event (branch results, worker completions, status updates).
     async fn handle_event(&mut self, event: ProcessEvent) -> Result<()> {
         // Only process events targeted at this channel
@@ -879,10 +974,19 @@ impl Channel {
         let run_logger = &self.state.process_run_logger;
 
         match &event {
-            ProcessEvent::BranchStarted { branch_id, channel_id, description, .. } => {
+            ProcessEvent::BranchStarted {
+                branch_id,
+                channel_id,
+                description,
+                ..
+            } => {
                 run_logger.log_branch_started(channel_id, *branch_id, description);
             }
-            ProcessEvent::BranchResult { branch_id, conclusion, .. } => {
+            ProcessEvent::BranchResult {
+                branch_id,
+                conclusion,
+                ..
+            } => {
                 run_logger.log_branch_completed(*branch_id, conclusion);
 
                 // Remove from active branches
@@ -904,13 +1008,25 @@ impl Channel {
                     tracing::info!(branch_id = %branch_id, "branch result incorporated");
                 }
             }
-            ProcessEvent::WorkerStarted { worker_id, channel_id, task, .. } => {
+            ProcessEvent::WorkerStarted {
+                worker_id,
+                channel_id,
+                task,
+                ..
+            } => {
                 run_logger.log_worker_started(channel_id.as_ref(), *worker_id, task);
             }
-            ProcessEvent::WorkerStatus { worker_id, status, .. } => {
+            ProcessEvent::WorkerStatus {
+                worker_id, status, ..
+            } => {
                 run_logger.log_worker_status(*worker_id, status);
             }
-            ProcessEvent::WorkerComplete { worker_id, result, notify, .. } => {
+            ProcessEvent::WorkerComplete {
+                worker_id,
+                result,
+                notify,
+                ..
+            } => {
                 run_logger.log_worker_completed(*worker_id, result);
 
                 let mut workers = self.state.active_workers.write().await;
@@ -926,7 +1042,7 @@ impl Channel {
                     history.push(rig::message::Message::from(worker_message));
                     should_retrigger = true;
                 }
-                
+
                 tracing::info!(worker_id = %worker_id, "worker completed");
             }
             _ => {}
@@ -935,8 +1051,11 @@ impl Channel {
         // Re-trigger the channel LLM so it can process the result and respond
         if should_retrigger {
             if let Some(conversation_id) = &self.conversation_id {
-                let retrigger_message = self.deps.runtime_config
-                    .prompts.load()
+                let retrigger_message = self
+                    .deps
+                    .runtime_config
+                    .prompts
+                    .load()
                     .render_system_retrigger()
                     .expect("failed to render retrigger message");
 
@@ -956,10 +1075,10 @@ impl Channel {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Get the current status block as a string.
     pub async fn get_status(&self) -> String {
         let status = self.state.status_block.read().await;
@@ -1016,8 +1135,14 @@ pub async fn spawn_branch_from_state(
         )
         .expect("failed to render branch prompt");
 
-    spawn_branch(state, &description, &description, &system_prompt, &description)
-        .await
+    spawn_branch(
+        state,
+        &description,
+        &description,
+        &system_prompt,
+        &description,
+    )
+    .await
 }
 
 /// Spawn a silent memory persistence branch.
@@ -1037,8 +1162,14 @@ async fn spawn_memory_persistence_branch(
         .render_system_memory_persistence()
         .expect("failed to render memory persistence prompt");
 
-    spawn_branch(state, "memory persistence", &prompt, &system_prompt, "persisting memories...")
-        .await
+    spawn_branch(
+        state,
+        "memory persistence",
+        &prompt,
+        &system_prompt,
+        "persisting memories...",
+    )
+    .await
 }
 
 /// Shared branch spawning logic.
@@ -1113,12 +1244,16 @@ async fn spawn_branch(
         status.add_branch(branch_id, status_label);
     }
 
-    state.deps.event_tx.send(crate::ProcessEvent::BranchStarted {
-        agent_id: state.deps.agent_id.clone(),
-        branch_id,
-        channel_id: state.channel_id.clone(),
-        description: status_label.to_string(),
-    }).ok();
+    state
+        .deps
+        .event_tx
+        .send(crate::ProcessEvent::BranchStarted {
+            agent_id: state.deps.agent_id.clone(),
+            branch_id,
+            channel_id: state.channel_id.clone(),
+            description: status_label.to_string(),
+        })
+        .ok();
 
     tracing::info!(branch_id = %branch_id, description = %status_label, "branch spawned");
 
@@ -1171,7 +1306,7 @@ pub async fn spawn_worker_from_state(
     } else {
         worker_system_prompt
     };
-    
+
     let worker = if interactive {
         let (worker, input_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
@@ -1184,7 +1319,11 @@ pub async fn spawn_worker_from_state(
             state.logs_dir.clone(),
         );
         let worker_id = worker.id;
-        state.worker_inputs.write().await.insert(worker_id, input_tx);
+        state
+            .worker_inputs
+            .write()
+            .await
+            .insert(worker_id, input_tx);
         worker
     } else {
         Worker::new(
@@ -1198,7 +1337,7 @@ pub async fn spawn_worker_from_state(
             state.logs_dir.clone(),
         )
     };
-    
+
     let worker_id = worker.id;
 
     let worker_span = tracing::info_span!(
@@ -1222,15 +1361,19 @@ pub async fn spawn_worker_from_state(
         status.add_worker(worker_id, &task, false);
     }
 
-    state.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
-        agent_id: state.deps.agent_id.clone(),
-        worker_id,
-        channel_id: Some(state.channel_id.clone()),
-        task: task.clone(),
-    }).ok();
+    state
+        .deps
+        .event_tx
+        .send(crate::ProcessEvent::WorkerStarted {
+            agent_id: state.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(state.channel_id.clone()),
+            task: task.clone(),
+        })
+        .ok();
 
     tracing::info!(worker_id = %worker_id, task = %task, "worker spawned");
-    
+
     Ok(worker_id)
 }
 
@@ -1270,7 +1413,11 @@ pub async fn spawn_opencode_worker_from_state(
             state.deps.event_tx.clone(),
         );
         let worker_id = worker.id;
-        state.worker_inputs.write().await.insert(worker_id, input_tx);
+        state
+            .worker_inputs
+            .write()
+            .await
+            .insert(worker_id, input_tx);
         worker
     } else {
         crate::opencode::OpenCodeWorker::new(
@@ -1312,12 +1459,16 @@ pub async fn spawn_opencode_worker_from_state(
         status.add_worker(worker_id, &opencode_task, false);
     }
 
-    state.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
-        agent_id: state.deps.agent_id.clone(),
-        worker_id,
-        channel_id: Some(state.channel_id.clone()),
-        task: opencode_task,
-    }).ok();
+    state
+        .deps
+        .event_tx
+        .send(crate::ProcessEvent::WorkerStarted {
+            agent_id: state.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(state.channel_id.clone()),
+            task: opencode_task,
+        })
+        .ok();
 
     tracing::info!(worker_id = %worker_id, task = %task, "OpenCode worker spawned");
 
@@ -1348,12 +1499,21 @@ pub async fn spawn_cli_worker_from_state(
         )));
     }
 
-    let backend = cli_config.backends.get(backend_name)
-        .ok_or_else(|| AgentError::Other(anyhow::anyhow!(
-            "CLI backend '{}' not found. Available: {}",
-            backend_name,
-            cli_config.backends.keys().cloned().collect::<Vec<_>>().join(", ")
-        )))?
+    let backend = cli_config
+        .backends
+        .get(backend_name)
+        .ok_or_else(|| {
+            AgentError::Other(anyhow::anyhow!(
+                "CLI backend '{}' not found. Available: {}",
+                backend_name,
+                cli_config
+                    .backends
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?
         .clone();
 
     let worker = if interactive {
@@ -1367,7 +1527,11 @@ pub async fn spawn_cli_worker_from_state(
             state.deps.event_tx.clone(),
         );
         let worker_id = worker.id;
-        state.worker_inputs.write().await.insert(worker_id, input_tx);
+        state
+            .worker_inputs
+            .write()
+            .await
+            .insert(worker_id, input_tx);
         worker
     } else {
         crate::cli_worker::CliWorker::new(
@@ -1402,12 +1566,16 @@ pub async fn spawn_cli_worker_from_state(
         status.add_worker(worker_id, &cli_task, false);
     }
 
-    state.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
-        agent_id: state.deps.agent_id.clone(),
-        worker_id,
-        channel_id: Some(state.channel_id.clone()),
-        task: cli_task,
-    }).ok();
+    state
+        .deps
+        .event_tx
+        .send(crate::ProcessEvent::WorkerStarted {
+            agent_id: state.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(state.channel_id.clone()),
+            task: cli_task,
+        })
+        .ok();
 
     tracing::info!(worker_id = %worker_id, backend = %backend_name, task = %task, "CLI worker spawned");
 
@@ -1468,10 +1636,20 @@ where
 fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
     // Match patterns like "[reply]\n{...}" or "(reply)\n{...}" (with optional whitespace)
     let tool_prefixes = [
-        "[reply]", "(reply)", "[react]", "(react)",
-        "[skip]", "(skip)", "[branch]", "(branch)",
-        "[spawn_worker]", "(spawn_worker)", "[route]", "(route)",
-        "[cancel]", "(cancel)",
+        "[reply]",
+        "(reply)",
+        "[react]",
+        "(react)",
+        "[skip]",
+        "(skip)",
+        "[branch]",
+        "(branch)",
+        "[spawn_worker]",
+        "(spawn_worker)",
+        "[route]",
+        "(route)",
+        "[cancel]",
+        "(cancel)",
     ];
 
     let lower = text.to_lowercase();
@@ -1515,21 +1693,35 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
     }
 
     // Use platform-formatted author if available, fall back to metadata
-    let display_name = message.formatted_author.as_deref()
-        .or_else(|| message.metadata.get("sender_display_name").and_then(|v| v.as_str()))
+    let display_name = message
+        .formatted_author
+        .as_deref()
+        .or_else(|| {
+            message
+                .metadata
+                .get("sender_display_name")
+                .and_then(|v| v.as_str())
+        })
         .unwrap_or(&message.sender_id);
 
-    let bot_tag = if message.metadata.get("sender_is_bot").and_then(|v| v.as_bool()).unwrap_or(false) {
+    let bot_tag = if message
+        .metadata
+        .get("sender_is_bot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         " (bot)"
     } else {
         ""
     };
 
-    let reply_context = message.metadata
+    let reply_context = message
+        .metadata
         .get("reply_to_author")
         .and_then(|v| v.as_str())
         .map(|author| {
-            let content_preview = message.metadata
+            let content_preview = message
+                .metadata
                 .get("reply_to_content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
@@ -1551,15 +1743,18 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
 /// channel's workers would leak into sibling channels (e.g. threads).
 fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
     match event {
-        ProcessEvent::BranchResult { channel_id: event_channel, .. } => {
-            event_channel == channel_id
-        }
-        ProcessEvent::WorkerComplete { channel_id: event_channel, .. } => {
-            event_channel.as_ref() == Some(channel_id)
-        }
-        ProcessEvent::WorkerStatus { channel_id: event_channel, .. } => {
-            event_channel.as_ref() == Some(channel_id)
-        }
+        ProcessEvent::BranchResult {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
+        ProcessEvent::WorkerComplete {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::WorkerStatus {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
         // Status block updates, tool events, etc. — match on agent_id which
         // is already filtered by the event bus subscription. Let them through.
         _ => true,
@@ -1571,9 +1766,16 @@ const IMAGE_MIME_PREFIXES: &[&str] = &["image/jpeg", "image/png", "image/gif", "
 
 /// Text-based MIME types where we inline the content.
 const TEXT_MIME_PREFIXES: &[&str] = &[
-    "text/", "application/json", "application/xml", "application/javascript",
-    "application/typescript", "application/toml", "application/yaml",
+    "text/",
+    "application/json",
+    "application/xml",
+    "application/javascript",
+    "application/typescript",
+    "application/toml",
+    "application/yaml",
 ];
+
+const LOCAL_ATTACHMENT_URL_PREFIX: &str = "spacebot-file://";
 
 /// Download attachments and convert them to LLM-ready UserContent parts.
 ///
@@ -1587,18 +1789,23 @@ async fn download_attachments(
     let mut parts = Vec::new();
 
     for attachment in attachments {
-        let is_image = IMAGE_MIME_PREFIXES.iter().any(|p| attachment.mime_type.starts_with(p));
-        let is_text = TEXT_MIME_PREFIXES.iter().any(|p| attachment.mime_type.starts_with(p));
+        let is_image = IMAGE_MIME_PREFIXES
+            .iter()
+            .any(|p| attachment.mime_type.starts_with(p));
+        let is_text = TEXT_MIME_PREFIXES
+            .iter()
+            .any(|p| attachment.mime_type.starts_with(p));
 
         let content = if is_image {
-            download_image_attachment(http, attachment).await
+            download_image_attachment(deps, http, attachment).await
         } else if is_text {
-            download_text_attachment(http, attachment).await
+            download_text_attachment(deps, http, attachment).await
         } else if attachment.mime_type.starts_with("audio/") {
             // Download audio files to /tmp and provide the path
-            download_audio_attachment(http, attachment).await
+            download_audio_attachment(deps, http, attachment).await
         } else {
-            let size_str = attachment.size_bytes
+            let size_str = attachment
+                .size_bytes
                 .map(|s| format!("{:.1} KB", s as f64 / 1024.0))
                 .unwrap_or_else(|| "unknown size".into());
             UserContent::text(format!(
@@ -1615,14 +1822,40 @@ async fn download_attachments(
 
 /// Download an image attachment and encode it as base64 for the LLM.
 async fn download_image_attachment(
+    deps: &AgentDeps,
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
+    match resolve_local_attachment_path(deps, attachment).await {
+        Ok(Some(local_path)) => {
+            let bytes = match tokio::fs::read(&local_path).await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(%error, filename = %attachment.filename, path = %local_path.display(), "failed to read local image");
+                    return UserContent::text(format!(
+                        "[Failed to read local image: {}]",
+                        attachment.filename
+                    ));
+                }
+            };
+
+            use base64::Engine as _;
+            let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let media_type = ImageMediaType::from_mime_type(&attachment.mime_type);
+            return UserContent::image_base64(base64_data, media_type, None);
+        }
+        Ok(None) => {}
+        Err(error_text) => return UserContent::text(error_text),
+    }
+
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download image");
-            return UserContent::text(format!("[Failed to download image: {}]", attachment.filename));
+            return UserContent::text(format!(
+                "[Failed to download image: {}]",
+                attachment.filename
+            ));
         }
     };
 
@@ -1630,7 +1863,10 @@ async fn download_image_attachment(
         Ok(b) => b,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to read image bytes");
-            return UserContent::text(format!("[Failed to download image: {}]", attachment.filename));
+            return UserContent::text(format!(
+                "[Failed to download image: {}]",
+                attachment.filename
+            ));
         }
     };
 
@@ -1650,14 +1886,29 @@ async fn download_image_attachment(
 
 /// Download an audio attachment, save to /tmp, and return the file path for tool use.
 async fn download_audio_attachment(
+    deps: &AgentDeps,
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
+    match resolve_local_attachment_path(deps, attachment).await {
+        Ok(Some(local_path)) => {
+            return UserContent::text(format!(
+                "[Voice/audio message saved to: {}] (Use transcribe.sh to transcribe it, then respond to the content)",
+                local_path.display()
+            ));
+        }
+        Ok(None) => {}
+        Err(error_text) => return UserContent::text(error_text),
+    }
+
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download audio");
-            return UserContent::text(format!("[Failed to download audio: {}]", attachment.filename));
+            return UserContent::text(format!(
+                "[Failed to download audio: {}]",
+                attachment.filename
+            ));
         }
     };
 
@@ -1665,7 +1916,10 @@ async fn download_audio_attachment(
         Ok(b) => b,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to read audio bytes");
-            return UserContent::text(format!("[Failed to download audio: {}]", attachment.filename));
+            return UserContent::text(format!(
+                "[Failed to download audio: {}]",
+                attachment.filename
+            ));
         }
     };
 
@@ -1691,14 +1945,50 @@ async fn download_audio_attachment(
 
 /// Download a text attachment and inline its content for the LLM.
 async fn download_text_attachment(
+    deps: &AgentDeps,
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
+    match resolve_local_attachment_path(deps, attachment).await {
+        Ok(Some(local_path)) => {
+            let content = match tokio::fs::read_to_string(&local_path).await {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::warn!(%error, filename = %attachment.filename, path = %local_path.display(), "failed to read local text file");
+                    return UserContent::text(format!(
+                        "[Failed to read local file: {}]",
+                        attachment.filename
+                    ));
+                }
+            };
+
+            let truncated = if content.len() > 50_000 {
+                format!(
+                    "{}...\n[truncated — {} bytes total]",
+                    &content[..50_000],
+                    content.len()
+                )
+            } else {
+                content
+            };
+
+            return UserContent::text(format!(
+                "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
+                attachment.filename, attachment.mime_type, truncated
+            ));
+        }
+        Ok(None) => {}
+        Err(error_text) => return UserContent::text(error_text),
+    }
+
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download text file");
-            return UserContent::text(format!("[Failed to download file: {}]", attachment.filename));
+            return UserContent::text(format!(
+                "[Failed to download file: {}]",
+                attachment.filename
+            ));
         }
     };
 
@@ -1712,7 +2002,11 @@ async fn download_text_attachment(
 
     // Truncate very large files to avoid blowing up context
     let truncated = if content.len() > 50_000 {
-        format!("{}...\n[truncated — {} bytes total]", &content[..50_000], content.len())
+        format!(
+            "{}...\n[truncated — {} bytes total]",
+            &content[..50_000],
+            content.len()
+        )
     } else {
         content
     };
@@ -1727,4 +2021,59 @@ async fn download_text_attachment(
         "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
         attachment.filename, attachment.mime_type, truncated
     ))
+}
+
+fn decode_local_attachment_url(url: &str) -> Option<String> {
+    let encoded_path = url.strip_prefix(LOCAL_ATTACHMENT_URL_PREFIX)?;
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded_path)
+        .ok()?;
+    String::from_utf8(decoded).ok()
+}
+
+async fn resolve_local_attachment_path(
+    deps: &AgentDeps,
+    attachment: &crate::Attachment,
+) -> std::result::Result<Option<std::path::PathBuf>, String> {
+    let Some(decoded_path) = decode_local_attachment_url(&attachment.url) else {
+        return Ok(None);
+    };
+
+    let canonical_path = tokio::fs::canonicalize(&decoded_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, filename = %attachment.filename, path = %decoded_path, "failed to canonicalize local attachment path");
+            format!("[Failed to resolve local attachment: {}]", attachment.filename)
+        })?;
+
+    if !canonical_path.starts_with(&deps.runtime_config.workspace_dir) {
+        tracing::warn!(
+            filename = %attachment.filename,
+            path = %canonical_path.display(),
+            workspace = %deps.runtime_config.workspace_dir.display(),
+            "rejected local attachment outside workspace"
+        );
+        return Err(format!(
+            "[Rejected local attachment outside workspace: {}]",
+            attachment.filename
+        ));
+    }
+
+    let metadata = tokio::fs::metadata(&canonical_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, filename = %attachment.filename, path = %canonical_path.display(), "failed to stat local attachment");
+            format!("[Failed to read local attachment: {}]", attachment.filename)
+        })?;
+
+    if !metadata.is_file() {
+        tracing::warn!(filename = %attachment.filename, path = %canonical_path.display(), "local attachment path is not a file");
+        return Err(format!(
+            "[Rejected local attachment path (not a file): {}]",
+            attachment.filename
+        ));
+    }
+
+    Ok(Some(canonical_path))
 }

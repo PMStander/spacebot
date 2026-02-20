@@ -1071,7 +1071,7 @@ function ConfigToggleField({ label, description, value, onChange }: ConfigToggle
 function SkillsSection({ agentId, detail }: { agentId: string; detail: string }) {
 	const skillsQuery = useQuery({
 		queryKey: ["agent-skills", agentId],
-		queryFn: () => api.agentSkills(agentId),
+		queryFn: () => api.listSkills(agentId),
 		staleTime: 10_000,
 	});
 

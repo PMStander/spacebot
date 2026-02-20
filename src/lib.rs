@@ -183,6 +183,8 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
+    /// API event broadcaster for SSE notifications (canvas updates, etc.).
+    pub api_event_tx: Option<tokio::sync::broadcast::Sender<api::ApiEvent>>,
 }
 
 impl AgentDeps {

@@ -335,13 +335,56 @@ pub fn detect_artifact_kind(content: &str) -> Option<&'static str> {
         return Some("image");
     }
 
-    // Book: JSON object with a "pages" array whose first page has "panels"
+    // JSON-based artifact detection
     if trimmed.starts_with('{') {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Book: has pages[].panels
             let has_pages = val.get("pages").and_then(|v| v.as_array()).is_some();
             let has_panels = val["pages"][0].get("panels").is_some();
             if has_pages && has_panels {
                 return Some("book");
+            }
+
+            // Chart: has "series" array and "xKey"
+            if val.get("series").and_then(|v| v.as_array()).is_some()
+                && val.get("xKey").is_some()
+            {
+                return Some("chart");
+            }
+
+            // Checklist: has groups[].items
+            if val.get("groups").and_then(|v| v.as_array()).is_some()
+                && val["groups"][0].get("items").is_some()
+            {
+                return Some("checklist");
+            }
+
+            // Form: has fields[].label
+            if val.get("fields").and_then(|v| v.as_array()).is_some()
+                && val["fields"][0].get("label").is_some()
+            {
+                return Some("form");
+            }
+
+            // Kanban: has columns[].cards (must be before table)
+            if val.get("columns").and_then(|v| v.as_array()).is_some()
+                && val["columns"][0].get("cards").is_some()
+            {
+                return Some("kanban");
+            }
+
+            // Table: has "columns" and "rows" arrays
+            if val.get("columns").and_then(|v| v.as_array()).is_some()
+                && val.get("rows").and_then(|v| v.as_array()).is_some()
+            {
+                return Some("table");
+            }
+
+            // Graph: has "nodes" and "edges" arrays
+            if val.get("nodes").and_then(|v| v.as_array()).is_some()
+                && val.get("edges").and_then(|v| v.as_array()).is_some()
+            {
+                return Some("graph");
             }
         }
     }

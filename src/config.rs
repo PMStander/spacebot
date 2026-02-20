@@ -105,7 +105,9 @@ pub enum ApiType {
 }
 
 impl<'de> serde::Deserialize<'de> for ApiType {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "openai_completions" => Ok(Self::OpenAiCompletions),
@@ -965,10 +967,8 @@ pub struct TwitchPermissions {
 impl TwitchPermissions {
     /// Build from the current config's twitch settings and bindings.
     pub fn from_config(_twitch: &TwitchConfig, bindings: &[Binding]) -> Self {
-        let twitch_bindings: Vec<&Binding> = bindings
-            .iter()
-            .filter(|b| b.channel == "twitch")
-            .collect();
+        let twitch_bindings: Vec<&Binding> =
+            bindings.iter().filter(|b| b.channel == "twitch").collect();
 
         let channel_filter = {
             let channel_ids: Vec<String> = twitch_bindings
@@ -1106,6 +1106,7 @@ struct TomlLlmConfigFields {
     openai_key: Option<String>,
     openrouter_key: Option<String>,
     zhipu_key: Option<String>,
+    zhipu_sub_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
     fireworks_key: Option<String>,
@@ -1184,6 +1185,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             openai_key: fields.openai_key,
             openrouter_key: fields.openrouter_key,
             zhipu_key: fields.zhipu_key,
+            zhipu_sub_key: fields.zhipu_sub_key,
             groq_key: fields.groq_key,
             together_key: fields.together_key,
             fireworks_key: fields.fireworks_key,
@@ -1564,14 +1566,14 @@ impl Config {
         if has_legacy_keys {
             return false;
         }
-        
+
         // Check if we have any provider-specific env variables (provider.<name>.*)
         let has_provider_env_vars = std::env::vars().any(|(key, _)| {
-            key.starts_with("SPACEBOT_PROVIDER_") 
-            || key.starts_with("PROVIDER_")
-            || key.contains("PROVIDER") && key.contains("API_KEY")
+            key.starts_with("SPACEBOT_PROVIDER_")
+                || key.starts_with("PROVIDER_")
+                || key.contains("PROVIDER") && key.contains("API_KEY")
         });
-        
+
         !has_provider_env_vars
     }
 
@@ -1660,7 +1662,7 @@ impl Config {
                     name: None,
                 });
         }
-        
+
         if let Some(zhipu_key) = llm.zhipu_key.clone() {
             llm.providers
                 .entry("zhipu".to_string())
@@ -1671,7 +1673,18 @@ impl Config {
                     name: None,
                 });
         }
-        
+
+        if let Some(zhipu_sub_key) = llm.zhipu_sub_key.clone() {
+            llm.providers
+                .entry("zhipu-sub".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+                    api_key: zhipu_sub_key,
+                    name: None,
+                });
+        }
+
         if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
             llm.providers
                 .entry("zai-coding-plan".to_string())
@@ -1956,7 +1969,7 @@ impl Config {
                     name: None,
                 });
         }
-        
+
         if let Some(zhipu_key) = llm.zhipu_key.clone() {
             llm.providers
                 .entry("zhipu".to_string())
@@ -1967,7 +1980,18 @@ impl Config {
                     name: None,
                 });
         }
-        
+
+        if let Some(zhipu_sub_key) = llm.zhipu_sub_key.clone() {
+            llm.providers
+                .entry("zhipu-sub".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+                    api_key: zhipu_sub_key,
+                    name: None,
+                });
+        }
+
         if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
             llm.providers
                 .entry("zai-coding-plan".to_string())
@@ -2179,21 +2203,24 @@ impl Config {
                     let base = &base_defaults.cli_workers;
                     let mut backends = base.backends.clone();
                     for (name, backend) in cw.backends {
-                        let resolved_command = resolve_env_value(&backend.command)
-                            .unwrap_or(backend.command);
+                        let resolved_command =
+                            resolve_env_value(&backend.command).unwrap_or(backend.command);
                         let mut resolved_env = std::collections::HashMap::new();
                         for (key, value) in &backend.env {
                             if let Some(resolved) = resolve_env_value(value) {
                                 resolved_env.insert(key.clone(), resolved);
                             }
                         }
-                        backends.insert(name, crate::cli_worker::CliBackendConfig {
-                            command: resolved_command,
-                            args: backend.args,
-                            description: backend.description.unwrap_or_default(),
-                            env: resolved_env,
-                            timeout_secs: backend.timeout_secs.unwrap_or(600),
-                        });
+                        backends.insert(
+                            name,
+                            crate::cli_worker::CliBackendConfig {
+                                command: resolved_command,
+                                args: backend.args,
+                                description: backend.description.unwrap_or_default(),
+                                env: resolved_env,
+                                timeout_secs: backend.timeout_secs.unwrap_or(600),
+                            },
+                        );
                     }
                     crate::cli_worker::CliWorkersConfig {
                         enabled: cw.enabled.unwrap_or(base.enabled),
@@ -3103,7 +3130,11 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
         12 => ("MiniMax API key", "minimax_key", "minimax"),
         13 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        14 => ("Z.AI Coding Plan API key", "zai_coding_plan_key", "zai-coding-plan"),
+        14 => (
+            "Z.AI Coding Plan API key",
+            "zai_coding_plan_key",
+            "zai-coding-plan",
+        ),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -3544,7 +3575,9 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_needs_onboarding_without_config_or_env() {
-        let _lock = env_test_lock().lock().expect("failed to lock env test mutex");
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
         let _env = EnvGuard::new();
 
         assert!(Config::needs_onboarding());
@@ -3552,7 +3585,9 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_needs_onboarding_with_anthropic_env_key() {
-        let _lock = env_test_lock().lock().expect("failed to lock env test mutex");
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
         let _env = EnvGuard::new();
 
         unsafe {
@@ -3564,7 +3599,9 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_load_from_env_populates_legacy_key_and_provider() {
-        let _lock = env_test_lock().lock().expect("failed to lock env test mutex");
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
         let _env = EnvGuard::new();
 
         unsafe {

@@ -328,6 +328,7 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 				metadata={metadata ?? {}}
 				setMetadata={setMetadata}
 				getVersionContentById={getVersionContentById}
+				sendMessage={sendMessage}
 			/>
 		</ArtifactPanel>
 	);
@@ -376,7 +377,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 		try {
 			await api.deleteChannel(agentId, channelId);
 			await queryClient.invalidateQueries({ queryKey: ["channels"] });
-			navigate({ to: "/agents/$agentId/channels", params: { agentId } });
+			navigate({ to: isInternal ? "/agents/$agentId/chats" : "/agents/$agentId/channels", params: { agentId } });
 		} catch (error) {
 			console.warn("Failed to delete channel:", error);
 			setDeleting(false);
@@ -482,11 +483,11 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 					) : (
 						<>
 							<Link
-								to="/agents/$agentId/channels"
+								to={isInternal ? "/agents/$agentId/chats" : "/agents/$agentId/channels"}
 								params={{ agentId }}
 								className="text-tiny text-ink-faint hover:text-ink-dull"
 							>
-								Channels
+								{isInternal ? "Chats" : "Channels"}
 							</Link>
 							<span className="text-ink-faint/50">/</span>
 							{isInternal && editingName ? (

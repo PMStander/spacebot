@@ -161,6 +161,15 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/send_message_to_another_channel") => {
             include_str!("../../prompts/en/tools/send_message_description.md.j2")
         }
+        ("en", "tools/canvas_set") => {
+            include_str!("../../prompts/en/tools/canvas_set_description.md.j2")
+        }
+        ("en", "tools/canvas_remove") => {
+            include_str!("../../prompts/en/tools/canvas_remove_description.md.j2")
+        }
+        ("en", "tools/canvas_list") => {
+            include_str!("../../prompts/en/tools/canvas_list_description.md.j2")
+        }
 
         // Fallback: unknown language or key -> try English
         (lang, key) if lang != "en" => {

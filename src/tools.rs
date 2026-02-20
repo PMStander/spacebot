@@ -41,6 +41,7 @@ pub mod channel_recall;
 pub mod cron;
 pub mod send_file;
 pub mod send_message_to_another_channel;
+pub mod canvas;
 
 pub use reply::{ReplyTool, ReplyArgs, ReplyOutput, ReplyError};
 pub use branch_tool::{BranchTool, BranchArgs, BranchOutput, BranchError};
@@ -62,6 +63,7 @@ pub use channel_recall::{ChannelRecallTool, ChannelRecallArgs, ChannelRecallOutp
 pub use cron::{CronTool, CronArgs, CronOutput, CronError};
 pub use send_file::{SendFileTool, SendFileArgs, SendFileOutput, SendFileError};
 pub use send_message_to_another_channel::{SendMessageTool, SendMessageArgs, SendMessageOutput, SendMessageError};
+pub use canvas::{CanvasSetTool, CanvasRemoveTool, CanvasListTool};
 
 use crate::agent::channel::ChannelState;
 use crate::config::BrowserConfig;
@@ -201,12 +203,21 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    sqlite_pool: sqlx::SqlitePool,
+    api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace))
-        .tool(SetStatusTool::new(agent_id, worker_id, channel_id, event_tx));
+        .tool(SetStatusTool::new(agent_id.clone(), worker_id, channel_id, event_tx));
+
+    if let Some(api_tx) = api_event_tx {
+        server = server
+            .tool(CanvasSetTool::new(sqlite_pool.clone(), agent_id.to_string(), api_tx.clone()))
+            .tool(CanvasRemoveTool::new(sqlite_pool.clone(), agent_id.to_string(), api_tx))
+            .tool(CanvasListTool::new(sqlite_pool));
+    }
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
@@ -243,6 +254,9 @@ pub fn create_cortex_chat_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    sqlite_pool: sqlx::SqlitePool,
+    agent_id: String,
+    api_event_tx: broadcast::Sender<crate::api::ApiEvent>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
@@ -251,7 +265,10 @@ pub fn create_cortex_chat_tool_server(
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(instance_dir, workspace));
+        .tool(ExecTool::new(instance_dir, workspace))
+        .tool(CanvasSetTool::new(sqlite_pool.clone(), agent_id.clone(), api_event_tx.clone()))
+        .tool(CanvasRemoveTool::new(sqlite_pool.clone(), agent_id, api_event_tx))
+        .tool(CanvasListTool::new(sqlite_pool));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));

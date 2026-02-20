@@ -85,6 +85,8 @@ pub(super) async fn events_sse(
                             ApiEvent::ToolStarted { .. } => "tool_started",
                             ApiEvent::ToolCompleted { .. } => "tool_completed",
                             ApiEvent::ConfigReloaded => "config_reloaded",
+                            ApiEvent::CanvasUpdated { .. } => "canvas_updated",
+                            ApiEvent::CanvasRemoved { .. } => "canvas_removed",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

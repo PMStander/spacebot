@@ -14,6 +14,18 @@ export interface ArtifactPayload {
 	content: string;
 }
 
+export interface ArtifactRef {
+	id: string;
+	kind: string;
+	title: string;
+}
+
+export interface WorkerInfo {
+	id: string;
+	task: string;
+	status: "running" | "done";
+}
+
 /** Parse SSE events from a ReadableStream response body. */
 async function consumeSSE(
 	response: Response,
@@ -64,9 +76,30 @@ export function useCortexChat(
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
+	const [activeWorkers, setActiveWorkers] = useState<WorkerInfo[]>([]);
+	const [artifactRefs, setArtifactRefs] = useState<ArtifactRef[]>([]);
 	const loadedRef = useRef(false);
 	// Accumulate artifact content across delta events
 	const pendingArtifactRef = useRef<ArtifactPayload | null>(null);
+	// Keep a stable ref to threadId so EventSource callbacks can read it without
+	// causing the EventSource to be torn down and recreated on each thread change.
+	const threadIdRef = useRef<string | null>(null);
+	useEffect(() => {
+		threadIdRef.current = threadId;
+	}, [threadId]);
+
+	// Restore artifact cards from localStorage when thread loads
+	useEffect(() => {
+		if (!threadId) return;
+		const stored = localStorage.getItem(`cortex-arts-${threadId}`);
+		if (stored) {
+			try {
+				setArtifactRefs(JSON.parse(stored));
+			} catch {
+				/* ignore */
+			}
+		}
+	}, [threadId]);
 
 	// Load thread on mount — scoped to channel when one is provided
 	useEffect(() => {
@@ -92,6 +125,58 @@ export function useCortexChat(
 			});
 		}
 	}, [agentId, channelId]);
+
+	// Subscribe to the global SSE event stream to detect worker completions.
+	// When a worker belonging to this agent completes, mark it done and reload
+	// the cortex thread so the auto-synthesized response appears.
+	useEffect(() => {
+		const es = new EventSource("/api/events");
+
+		es.addEventListener("worker_completed", (event: MessageEvent) => {
+			try {
+				const data = JSON.parse(event.data);
+				if (data.agent_id !== agentId) return;
+
+				setActiveWorkers((prev) =>
+					prev.map((w) =>
+						w.id === data.worker_id ? { ...w, status: "done" as const } : w,
+					),
+				);
+
+				// Reload messages after a short delay to let the cortex synthesis save
+				const tid = threadIdRef.current;
+				if (tid) {
+					setTimeout(() => {
+						api
+							.cortexChatMessages(agentId, tid)
+							.then((resp) => setMessages(resp.messages))
+							.catch(() => {});
+					}, 500);
+				}
+			} catch {
+				/* ignore parse errors */
+			}
+		});
+
+		return () => es.close();
+	}, [agentId]);
+
+	const spawnWorker = useCallback(
+		async (task: string, skill?: string) => {
+			if (!threadId) return;
+			try {
+				const result = await api.cortexChatSpawnWorker(agentId, threadId, task, skill);
+				setActiveWorkers((prev) => [
+					...prev,
+					{ id: result.worker_id, task: result.task, status: "running" as const },
+				]);
+			} catch (err) {
+				console.warn("Failed to spawn cortex worker:", err);
+				setError("Failed to spawn worker");
+			}
+		},
+		[agentId, threadId],
+	);
 
 	const sendMessage = useCallback(async (text: string) => {
 		if (isStreaming || !threadId) return;
@@ -179,6 +264,12 @@ export function useCortexChat(
 					pendingArtifactRef.current = null;
 					if (artifact) {
 						onArtifactReceived?.(artifact);
+						const ref: ArtifactRef = { id: artifact.id, kind: artifact.kind, title: artifact.title };
+						setArtifactRefs((prev) => {
+							const updated = prev.some((r) => r.id === ref.id) ? prev : [...prev, ref];
+							localStorage.setItem(`cortex-arts-${threadId}`, JSON.stringify(updated));
+							return updated;
+						});
 					}
 				} else if (eventType === "error") {
 					try {
@@ -202,7 +293,20 @@ export function useCortexChat(
 		setMessages([]);
 		setError(null);
 		setToolActivity([]);
+		setActiveWorkers([]);
+		setArtifactRefs([]);
 	}, []);
 
-	return { messages, threadId, isStreaming, error, toolActivity, sendMessage, newThread };
+	return {
+		messages,
+		threadId,
+		isStreaming,
+		error,
+		toolActivity,
+		activeWorkers,
+		artifactRefs,
+		sendMessage,
+		spawnWorker,
+		newThread,
+	};
 }

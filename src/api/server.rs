@@ -1,12 +1,15 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, webchat};
+use super::{
+    agents, artifacts, bindings, canvas, channels, config, cortex, cron, ingest, local_file,
+    memories, messaging, models, providers, settings, skills, system, webchat, workers,
+};
 
-use axum::http::{header, StatusCode, Uri};
+use axum::Router;
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use axum::Router;
 use rust_embed::Embed;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -39,49 +42,119 @@ pub async fn start_http_server(
         .route("/status", get(system::status))
         .route("/overview", get(agents::instance_overview))
         .route("/events", get(system::events_sse))
-        .route("/agents", get(agents::list_agents).post(agents::create_agent).delete(agents::delete_agent))
+        .route(
+            "/agents",
+            get(agents::list_agents)
+                .post(agents::create_agent)
+                .delete(agents::delete_agent),
+        )
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels).post(channels::create_internal_channel).patch(channels::rename_channel).delete(channels::delete_channel))
+        .route(
+            "/channels",
+            get(channels::list_channels)
+                .post(channels::create_internal_channel)
+                .patch(channels::rename_channel)
+                .delete(channels::delete_channel),
+        )
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
         .route("/agents/memories/search", get(memories::search_memories))
         .route("/agents/memories/graph", get(memories::memory_graph))
-        .route("/agents/memories/graph/neighbors", get(memories::memory_graph_neighbors))
+        .route(
+            "/agents/memories/graph/neighbors",
+            get(memories::memory_graph_neighbors),
+        )
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
+        .route("/cortex-chat/upload", post(cortex::upload_chat_files))
+        .route(
+            "/cortex-chat/worker",
+            post(cortex::cortex_chat_spawn_worker),
+        )
         .route("/agents/profile", get(agents::get_agent_profile))
-        .route("/agents/avatar", get(agents::get_agent_avatar).post(agents::upload_agent_avatar))
-        .route("/agents/identity", get(agents::get_identity).put(agents::update_identity))
-        .route("/agents/config", get(config::get_agent_config).put(config::update_agent_config))
-        .route("/agents/cron", get(cron::list_cron_jobs).post(cron::create_or_update_cron).delete(cron::delete_cron))
+        .route(
+            "/agents/avatar",
+            get(agents::get_agent_avatar).post(agents::upload_agent_avatar),
+        )
+        .route(
+            "/agents/identity",
+            get(agents::get_identity).put(agents::update_identity),
+        )
+        .route(
+            "/agents/config",
+            get(config::get_agent_config).put(config::update_agent_config),
+        )
+        .route(
+            "/agents/cron",
+            get(cron::list_cron_jobs)
+                .post(cron::create_or_update_cron)
+                .delete(cron::delete_cron),
+        )
         .route("/agents/cron/executions", get(cron::cron_executions))
         .route("/agents/cron/trigger", post(cron::trigger_cron))
         .route("/agents/cron/toggle", put(cron::toggle_cron))
         .route("/agents/workers", get(workers::list_worker_runs))
         .route("/channels/cancel", post(channels::cancel_process))
-        .route("/agents/ingest/files", get(ingest::list_ingest_files).delete(ingest::delete_ingest_file))
+        .route(
+            "/agents/ingest/files",
+            get(ingest::list_ingest_files).delete(ingest::delete_ingest_file),
+        )
         .route("/agents/ingest/upload", post(ingest::upload_ingest_file))
         .route("/agents/skills", get(skills::list_skills))
         .route("/agents/skills/install", post(skills::install_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
-        .route("/providers", get(providers::get_providers).put(providers::update_provider))
+        .route(
+            "/providers",
+            get(providers::get_providers).put(providers::update_provider),
+        )
         .route("/providers/{provider}", delete(providers::delete_provider))
         .route("/models", get(models::get_models))
         .route("/models/refresh", post(models::refresh_models))
         .route("/messaging/status", get(messaging::messaging_status))
-        .route("/messaging/disconnect", post(messaging::disconnect_platform))
+        .route(
+            "/messaging/disconnect",
+            post(messaging::disconnect_platform),
+        )
         .route("/messaging/toggle", post(messaging::toggle_platform))
-        .route("/bindings", get(bindings::list_bindings).post(bindings::create_binding).put(bindings::update_binding).delete(bindings::delete_binding))
-        .route("/settings", get(settings::get_global_settings).put(settings::update_global_settings))
-        .route("/config/raw", get(settings::get_raw_config).put(settings::update_raw_config))
-        .route("/update/check", get(settings::update_check).post(settings::update_check_now))
+        .route(
+            "/bindings",
+            get(bindings::list_bindings)
+                .post(bindings::create_binding)
+                .put(bindings::update_binding)
+                .delete(bindings::delete_binding),
+        )
+        .route(
+            "/settings",
+            get(settings::get_global_settings).put(settings::update_global_settings),
+        )
+        .route(
+            "/config/raw",
+            get(settings::get_raw_config).put(settings::update_raw_config),
+        )
+        .route(
+            "/update/check",
+            get(settings::update_check).post(settings::update_check_now),
+        )
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
-        .route("/webchat/history", get(webchat::webchat_history));
+        .route("/webchat/upload", post(webchat::webchat_upload))
+        .route("/webchat/history", get(webchat::webchat_history))
+        .route(
+            "/agents/artifacts",
+            get(artifacts::list_artifacts).post(artifacts::create_artifact),
+        )
+        .route(
+            "/agents/artifacts/{id}",
+            get(artifacts::get_artifact)
+                .put(artifacts::update_artifact)
+                .delete(artifacts::delete_artifact),
+        )
+        .route("/local-file", get(local_file::serve_local_file))
+        .route("/canvas/panels", get(canvas::list_canvas_panels));
 
     let app = Router::new()
         .nest("/api", api_routes)
@@ -121,12 +194,7 @@ async fn static_handler(uri: Uri) -> Response {
     }
 
     if let Some(content) = InterfaceAssets::get("index.html") {
-        return Html(
-            std::str::from_utf8(&content.data)
-                .unwrap_or("")
-                .to_string(),
-        )
-        .into_response();
+        return Html(std::str::from_utf8(&content.data).unwrap_or("").to_string()).into_response();
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()

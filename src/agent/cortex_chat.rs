@@ -5,19 +5,23 @@
 //! When opened on a channel page, the channel's recent history is injected
 //! into the system prompt as context.
 
+use crate::agent::channel::{ChannelState, spawn_worker_from_state};
 use crate::conversation::history::ProcessRunLogger;
 use crate::llm::SpacebotModel;
-use crate::{AgentDeps, ProcessType};
+use crate::{AgentDeps, ProcessEvent, ProcessType, WorkerId};
 
 use rig::agent::{AgentBuilder, HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{AssistantContent, CompletionModel, CompletionResponse, Message, Prompt};
+use rig::message::{ImageMediaType, MimeType, UserContent};
+use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServerHandle;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 /// A persisted cortex chat message.
 #[derive(Debug, Clone, Serialize)]
@@ -30,6 +34,12 @@ pub struct CortexChatMessage {
     pub created_at: String,
 }
 
+/// Tracks an in-flight cortex worker so it can be auto-synthesized on completion.
+struct WorkerEntry {
+    thread_id: String,
+    task: String,
+}
+
 /// Events emitted during a cortex chat response (sent via SSE to the client).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -39,17 +49,33 @@ pub enum CortexChatEvent {
     /// A tool call started.
     ToolStarted { tool: String },
     /// A tool call completed.
-    ToolCompleted { tool: String, result_preview: String },
+    ToolCompleted {
+        tool: String,
+        result_preview: String,
+    },
     /// The full response is ready (artifact markup already stripped).
     Done { full_text: String },
     /// An error occurred.
     Error { message: String },
     /// An artifact block started (kind + title).
-    ArtifactStart { artifact_id: String, kind: String, title: String },
+    ArtifactStart {
+        artifact_id: String,
+        kind: String,
+        title: String,
+    },
     /// A chunk of artifact content.
     ArtifactDelta { artifact_id: String, data: String },
     /// Artifact content is complete.
     ArtifactDone { artifact_id: String },
+}
+
+/// An image attachment to inject into the LLM context before the user's text.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    /// Absolute path on disk — read and base64-encoded before the LLM call.
+    pub path: String,
 }
 
 /// Prompt hook that forwards tool events to an mpsc channel for SSE streaming.
@@ -213,6 +239,11 @@ pub struct CortexChatSession {
     pub store: CortexChatStore,
     /// Prevent concurrent sends — only one request at a time per agent.
     send_lock: Mutex<()>,
+    /// Dedicated channel state for background workers spawned from cortex chat.
+    /// None if workers are not enabled for this session.
+    worker_channel_state: Option<ChannelState>,
+    /// Registry of in-flight workers: worker_id → (thread_id, task).
+    worker_registry: Arc<RwLock<HashMap<WorkerId, WorkerEntry>>>,
 }
 
 impl CortexChatSession {
@@ -222,7 +253,113 @@ impl CortexChatSession {
             tool_server,
             store,
             send_lock: Mutex::new(()),
+            worker_channel_state: None,
+            worker_registry: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Create a session with worker support enabled.
+    pub fn new_with_workers(
+        deps: AgentDeps,
+        tool_server: ToolServerHandle,
+        store: CortexChatStore,
+        worker_channel_state: ChannelState,
+    ) -> Self {
+        Self {
+            deps,
+            tool_server,
+            store,
+            send_lock: Mutex::new(()),
+            worker_channel_state: Some(worker_channel_state),
+            worker_registry: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Spawn a background worker attributed to this cortex session.
+    ///
+    /// Returns the worker ID immediately. When the worker completes,
+    /// `start_worker_watcher` will inject the result into the thread and
+    /// trigger a cortex synthesis response automatically.
+    pub async fn spawn_cortex_worker(
+        self: &Arc<Self>,
+        thread_id: &str,
+        task: &str,
+        skill: Option<&str>,
+    ) -> anyhow::Result<WorkerId> {
+        let worker_state = self
+            .worker_channel_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("workers not enabled for this cortex session"))?;
+
+        let worker_id = spawn_worker_from_state(worker_state, task, false, skill)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        self.worker_registry.write().await.insert(
+            worker_id,
+            WorkerEntry {
+                thread_id: thread_id.to_string(),
+                task: task.to_string(),
+            },
+        );
+
+        Ok(worker_id)
+    }
+
+    /// Start the background watcher that listens for worker completions and
+    /// automatically triggers cortex synthesis for each completed worker.
+    ///
+    /// Should be called once after the session is created. No-op if workers
+    /// are not enabled (no worker_channel_state).
+    pub fn start_worker_watcher(self: &Arc<Self>) {
+        let Some(ref ws) = self.worker_channel_state else {
+            return;
+        };
+        let worker_channel_id = ws.channel_id.clone();
+        let session = Arc::clone(self);
+        let mut event_rx = self.deps.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(ProcessEvent::WorkerComplete {
+                        worker_id,
+                        channel_id,
+                        result,
+                        ..
+                    }) => {
+                        if channel_id.as_deref() != Some(worker_channel_id.as_ref()) {
+                            continue;
+                        }
+
+                        let entry = session.worker_registry.write().await.remove(&worker_id);
+                        let Some(entry) = entry else { continue };
+
+                        let synthesis_text =
+                            format!("[Worker Result: {}]\n\n{}", entry.task, result);
+
+                        // Fire-and-forget synthesis — response is saved to DB.
+                        // The frontend detects completion via the global ApiEvent stream.
+                        if let Err(error) = session
+                            .send_message_with_events(
+                                &entry.thread_id,
+                                &synthesis_text,
+                                None,
+                                vec![],
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                %error, %worker_id,
+                                "cortex auto-synthesis failed after worker completion"
+                            );
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    _ => {}
+                }
+            }
+        });
     }
 
     /// Send a message and stream events (tool calls, completion) back via an mpsc channel.
@@ -235,6 +372,7 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
+        attachments: Vec<ChatAttachment>,
     ) -> Result<mpsc::UnboundedReceiver<CortexChatEvent>, anyhow::Error> {
         let _guard = self.send_lock.lock().await;
 
@@ -285,6 +423,30 @@ impl CortexChatSession {
 
         tokio::spawn(async move {
             let channel_ref = channel_context_id.as_deref();
+
+            // Inject image attachments as a user message before the text prompt,
+            // mirroring the channel.rs multimodal pattern.
+            if !attachments.is_empty() {
+                use base64::Engine as _;
+                let mut image_parts: Vec<UserContent> = Vec::new();
+                for att in &attachments {
+                    match tokio::fs::read(&att.path).await {
+                        Ok(bytes) => {
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            let media_type = ImageMediaType::from_mime_type(&att.mime_type);
+                            image_parts.push(UserContent::image_base64(b64, media_type, None));
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, path = %att.path, "failed to read attachment for cortex chat");
+                        }
+                    }
+                }
+                if !image_parts.is_empty() {
+                    let content = OneOrMany::many(image_parts)
+                        .unwrap_or_else(|_| OneOrMany::one(UserContent::text("[attachment]")));
+                    history.push(rig::message::Message::User { content });
+                }
+            }
 
             let result = agent
                 .prompt(&user_text)
@@ -407,8 +569,7 @@ impl CortexChatSession {
                             ..
                         } => {
                             if let Some(result) = result {
-                                transcript
-                                    .push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
+                                transcript.push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
                             }
                         }
                     }
@@ -437,7 +598,9 @@ fn parse_artifact_tags(text: &str) -> Vec<(String, String, String, String)> {
         let start = pos + rel_start;
 
         // Find the end of the opening tag
-        let Some(rel_tag_end) = text[start..].find('>') else { break };
+        let Some(rel_tag_end) = text[start..].find('>') else {
+            break;
+        };
         let tag_end = start + rel_tag_end + 1;
         let tag = &text[start..tag_end];
 
@@ -445,7 +608,9 @@ fn parse_artifact_tags(text: &str) -> Vec<(String, String, String, String)> {
         let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
 
         // Find the closing tag
-        let Some(rel_close) = text[tag_end..].find("</artifact>") else { break };
+        let Some(rel_close) = text[tag_end..].find("</artifact>") else {
+            break;
+        };
         let content_end = tag_end + rel_close;
         let content = text[tag_end..content_end].trim().to_string();
 
@@ -461,8 +626,12 @@ fn strip_artifact_tags(text: &str) -> String {
     let mut result = text.to_string();
 
     loop {
-        let Some(start) = result.find("<artifact") else { break };
-        let Some(rel_close) = result[start..].find("</artifact>") else { break };
+        let Some(start) = result.find("<artifact") else {
+            break;
+        };
+        let Some(rel_close) = result[start..].find("</artifact>") else {
+            break;
+        };
         let end = start + rel_close + "</artifact>".len();
         result.replace_range(start..end, "");
     }

@@ -1,8 +1,8 @@
 use super::state::ApiState;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,7 +48,23 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen, minimax, moonshot, zai_coding_plan) = if config_path.exists() {
+    let (
+        anthropic,
+        openai,
+        openrouter,
+        zhipu,
+        zhipu_sub,
+        groq,
+        together,
+        fireworks,
+        deepseek,
+        xai,
+        mistral,
+        opencode_zen,
+        minimax,
+        moonshot,
+        zai_coding_plan,
+    ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -211,7 +227,11 @@ pub(super) async fn update_provider(
         let current_provider = crate::llm::routing::provider_from_model(current_channel);
 
         let has_provider_key = |toml_key: &str, env_var: &str| -> bool {
-            if let Some(s) = doc.get("llm").and_then(|l| l.get(toml_key)).and_then(|v| v.as_str()) {
+            if let Some(s) = doc
+                .get("llm")
+                .and_then(|l| l.get(toml_key))
+                .and_then(|v| v.as_str())
+            {
                 if let Some(var_name) = s.strip_prefix("env:") {
                     return std::env::var(var_name).is_ok();
                 }
@@ -254,7 +274,8 @@ pub(super) async fn update_provider(
                 defaults["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
 
-            if let Some(routing_table) = defaults.get_mut("routing").and_then(|r| r.as_table_mut()) {
+            if let Some(routing_table) = defaults.get_mut("routing").and_then(|r| r.as_table_mut())
+            {
                 routing_table["channel"] = toml_edit::value(&routing.channel);
                 routing_table["branch"] = toml_edit::value(&routing.branch);
                 routing_table["worker"] = toml_edit::value(&routing.worker);
@@ -274,14 +295,20 @@ pub(super) async fn update_provider(
         .ok();
 
     let routing_note = if should_set_routing {
-        format!(" Model routing updated to use {} defaults.", request.provider)
+        format!(
+            " Model routing updated to use {} defaults.",
+            request.provider
+        )
     } else {
         String::new()
     };
 
     Ok(Json(ProviderUpdateResponse {
         success: true,
-        message: format!("Provider '{}' configured.{}", request.provider, routing_note),
+        message: format!(
+            "Provider '{}' configured.{}",
+            request.provider, routing_note
+        ),
     }))
 }
 

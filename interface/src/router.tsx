@@ -13,6 +13,7 @@ import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
 import {AgentDetail} from "@/routes/AgentDetail";
 import {AgentChannels} from "@/routes/AgentChannels";
+import {AgentChats} from "@/routes/AgentChats";
 import {AgentCortex} from "@/routes/AgentCortex";
 import {ChannelDetail} from "@/routes/ChannelDetail";
 import {AgentMemories} from "@/routes/AgentMemories";
@@ -22,6 +23,7 @@ import {AgentIngest} from "@/routes/AgentIngest";
 import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentChat} from "@/routes/AgentChat";
+import {AgentCanvas} from "@/routes/AgentCanvas";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
@@ -136,6 +138,22 @@ const agentChatRoute = createRoute({
 	},
 });
 
+const agentCanvasRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/canvas",
+	component: function AgentCanvasPage() {
+		const {agentId} = agentCanvasRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentCanvas agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
 const agentChannelsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/channels",
@@ -147,6 +165,47 @@ const agentChannelsRoute = createRoute({
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
 					<AgentChannels agentId={agentId} liveStates={liveStates} />
+				</div>
+			</div>
+		);
+	},
+});
+
+const agentChatsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/chats",
+	component: function AgentChatsPage() {
+		const {agentId} = agentChatsRoute.useParams();
+		const {liveStates} = useLiveContext();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentChats agentId={agentId} liveStates={liveStates} />
+				</div>
+			</div>
+		);
+	},
+});
+
+const chatDetailRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/chats/$channelId",
+	component: function ChatDetailPage() {
+		const {agentId, channelId} = chatDetailRoute.useParams();
+		const {liveStates, channels, loadOlderMessages} = useLiveContext();
+		const channel = channels.find((c) => c.id === channelId);
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<ChannelDetail
+						agentId={agentId}
+						channelId={channelId}
+						channel={channel}
+						liveState={liveStates[channelId]}
+						onLoadMore={() => loadOlderMessages(channelId)}
+					/>
 				</div>
 			</div>
 		);
@@ -301,7 +360,10 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	agentRoute,
 	agentChatRoute,
+	agentCanvasRoute,
 	agentChannelsRoute,
+	agentChatsRoute,
+	chatDetailRoute,
 	agentMemoriesRoute,
 	agentIngestRoute,
 	agentWorkersRoute,

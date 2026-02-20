@@ -69,9 +69,11 @@ function BranchBadge({ branch }: { branch: ActiveBranch }) {
 export function ChannelCard({
 	channel,
 	liveState,
+	linkBase = "channels",
 }: {
 	channel: ChannelInfo;
 	liveState: ChannelLiveState | undefined;
+	linkBase?: "channels" | "chats";
 }) {
 	const isTyping = liveState?.isTyping ?? false;
 	const timeline = liveState?.timeline ?? [];
@@ -83,7 +85,7 @@ export function ChannelCard({
 
 	return (
 		<Link
-			to="/agents/$agentId/channels/$channelId"
+			to={linkBase === "chats" ? "/agents/$agentId/chats/$channelId" : "/agents/$agentId/channels/$channelId"}
 			params={{ agentId: channel.agent_id, channelId: channel.id }}
 			className="flex flex-col rounded-lg border border-app-line bg-app-darkBox transition-colors hover:border-app-line/80 hover:bg-app-darkBox/80"
 		>

@@ -167,6 +167,16 @@ pub enum ApiEvent {
     },
     /// Configuration was reloaded (skills, identity, etc.).
     ConfigReloaded,
+    /// A canvas panel was created or updated.
+    CanvasUpdated {
+        agent_id: String,
+        panel_name: String,
+    },
+    /// A canvas panel was removed.
+    CanvasRemoved {
+        agent_id: String,
+        panel_name: String,
+    },
 }
 
 impl ApiState {

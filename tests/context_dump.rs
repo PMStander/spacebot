@@ -79,6 +79,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        api_event_tx: None,
     };
 
     Ok((deps, config))
@@ -302,6 +303,8 @@ async fn dump_worker_context() {
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key, std::path::PathBuf::from("/tmp"), std::path::PathBuf::from("/tmp"),
+        deps.sqlite_pool.clone(),
+        deps.api_event_tx.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -423,6 +426,8 @@ async fn dump_all_contexts() {
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key, std::path::PathBuf::from("/tmp"), std::path::PathBuf::from("/tmp"),
+        deps.sqlite_pool.clone(),
+        deps.api_event_tx.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

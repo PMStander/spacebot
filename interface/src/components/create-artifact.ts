@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction, ComponentType, ReactNode } from "react";
 
-export type ArtifactKind = "code" | "text" | "image" | "sheet" | "book";
+export type ArtifactKind = "code" | "text" | "image" | "sheet" | "book" | "html"
+	| "chart" | "diagram" | "checklist" | "form" | "kanban" | "table" | "graph";
 
 export interface UIArtifact {
 	id: string;
@@ -59,6 +60,7 @@ export type ArtifactContentProps<M = any> = {
 	metadata: M;
 	setMetadata: Dispatch<SetStateAction<M>>;
 	getVersionContentById: (index: number) => string;
+	sendMessage?: (text: string) => void;
 };
 
 type ArtifactConfig<T extends string, M = any> = {

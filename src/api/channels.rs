@@ -3,12 +3,14 @@ use super::state::ApiState;
 use crate::conversation::channels::ChannelStore;
 use crate::conversation::history::ProcessRunLogger;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+const RESERVED_INTERNAL_CHANNEL_PREFIX: &str = "internal:cortex-workers-";
 
 #[derive(Deserialize)]
 pub(super) struct RenameChannelRequest {
@@ -94,6 +96,9 @@ pub(super) async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<Ch
         match store.list_active().await {
             Ok(channels) => {
                 for channel in channels {
+                    if channel.id.starts_with(RESERVED_INTERNAL_CHANNEL_PREFIX) {
+                        continue;
+                    }
                     all_channels.push(ChannelResponse {
                         agent_id: agent_id.clone(),
                         id: channel.id,
@@ -111,7 +116,9 @@ pub(super) async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<Ch
         }
     }
 
-    Json(ChannelsResponse { channels: all_channels })
+    Json(ChannelsResponse {
+        channels: all_channels,
+    })
 }
 
 /// Get the unified timeline for a channel: messages, branch runs, and worker runs
@@ -126,10 +133,17 @@ pub(super) async fn channel_messages(
 
     for (_agent_id, pool) in pools.iter() {
         let logger = ProcessRunLogger::new(pool.clone());
-        match logger.load_channel_timeline(&query.channel_id, fetch_limit, query.before.as_deref()).await {
+        match logger
+            .load_channel_timeline(&query.channel_id, fetch_limit, query.before.as_deref())
+            .await
+        {
             Ok(items) if !items.is_empty() => {
                 let has_more = items.len() as i64 > limit;
-                let items = if has_more { items[items.len() - limit as usize..].to_vec() } else { items };
+                let items = if has_more {
+                    items[items.len() - limit as usize..].to_vec()
+                } else {
+                    items
+                };
                 return Json(MessagesResponse { items, has_more });
             }
             Ok(_) => continue,
@@ -140,7 +154,10 @@ pub(super) async fn channel_messages(
         }
     }
 
-    Json(MessagesResponse { items: vec![], has_more: false })
+    Json(MessagesResponse {
+        items: vec![],
+        has_more: false,
+    })
 }
 
 /// Get live status (active workers, branches, completed items) for all channels.
@@ -169,14 +186,19 @@ pub(super) async fn create_internal_channel(
     Json(request): Json<CreateChannelRequest>,
 ) -> Result<Json<CreateChannelResponseBody>, StatusCode> {
     let pools = state.agent_pools.load();
-    let pool: sqlx::SqlitePool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let pool: sqlx::SqlitePool = pools
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
 
     let channel_id = format!("internal:{}", uuid::Uuid::new_v4());
-    let display_name = request.display_name.or_else(|| Some("New Chat".to_string()));
+    let display_name = request
+        .display_name
+        .or_else(|| Some("New Chat".to_string()));
 
     sqlx::query(
         "INSERT INTO channels (id, platform, display_name, platform_meta, last_activity_at) \
-         VALUES (?, 'internal', ?, NULL, CURRENT_TIMESTAMP)"
+         VALUES (?, 'internal', ?, NULL, CURRENT_TIMESTAMP)",
     )
     .bind(&channel_id)
     .bind(&display_name)
@@ -200,11 +222,21 @@ pub(super) async fn rename_channel(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<RenameChannelRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    if request
+        .channel_id
+        .starts_with(RESERVED_INTERNAL_CHANNEL_PREFIX)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let pools = state.agent_pools.load();
-    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let pool = pools
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
 
     let rows_affected = sqlx::query(
-        "UPDATE channels SET display_name = ? WHERE id = ? AND platform = 'internal'"
+        "UPDATE channels SET display_name = ? WHERE id = ? AND platform = 'internal'",
     )
     .bind(&request.display_name)
     .bind(&request.channel_id)
@@ -229,12 +261,22 @@ pub(super) async fn delete_channel(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<DeleteChannelQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    if query
+        .channel_id
+        .starts_with(RESERVED_INTERNAL_CHANNEL_PREFIX)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let pools = state.agent_pools.load();
-    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let pool = pools
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
 
     // Verify it exists and is internal before deleting
     let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND platform = 'internal')"
+        "SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND platform = 'internal')",
     )
     .bind(&query.channel_id)
     .fetch_one(&pool)
@@ -247,15 +289,29 @@ pub(super) async fn delete_channel(
 
     // Delete all channel-scoped data; memories are agent-scoped and preserved
     sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
-        .bind(&query.channel_id).execute(&pool).await.ok();
+        .bind(&query.channel_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM branch_runs WHERE channel_id = ?")
-        .bind(&query.channel_id).execute(&pool).await.ok();
+        .bind(&query.channel_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM worker_runs WHERE channel_id = ?")
-        .bind(&query.channel_id).execute(&pool).await.ok();
+        .bind(&query.channel_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM artifacts WHERE channel_id = ?")
-        .bind(&query.channel_id).execute(&pool).await.ok();
+        .bind(&query.channel_id)
+        .execute(&pool)
+        .await
+        .ok();
     sqlx::query("DELETE FROM channels WHERE id = ?")
-        .bind(&query.channel_id).execute(&pool).await
+        .bind(&query.channel_id)
+        .execute(&pool)
+        .await
         .map_err(|error| {
             tracing::warn!(%error, channel_id = %query.channel_id, "failed to delete channel");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -270,13 +326,19 @@ pub(super) async fn cancel_process(
     Json(request): Json<CancelProcessRequest>,
 ) -> Result<Json<CancelProcessResponse>, StatusCode> {
     let states = state.channel_states.read().await;
-    let channel_state = states.get(&request.channel_id).ok_or(StatusCode::NOT_FOUND)?;
+    let channel_state = states
+        .get(&request.channel_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     match request.process_type.as_str() {
         "worker" => {
-            let worker_id: crate::WorkerId = request.process_id.parse()
+            let worker_id: crate::WorkerId = request
+                .process_id
+                .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            channel_state.cancel_worker(worker_id).await
+            channel_state
+                .cancel_worker(worker_id)
+                .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {
                 success: true,
@@ -284,9 +346,13 @@ pub(super) async fn cancel_process(
             }))
         }
         "branch" => {
-            let branch_id: crate::BranchId = request.process_id.parse()
+            let branch_id: crate::BranchId = request
+                .process_id
+                .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            channel_state.cancel_branch(branch_id).await
+            channel_state
+                .cancel_branch(branch_id)
+                .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {
                 success: true,

@@ -180,6 +180,8 @@ impl Worker {
             self.brave_search_key.clone(),
             self.deps.runtime_config.workspace_dir.clone(),
             self.deps.runtime_config.instance_dir.clone(),
+            self.deps.sqlite_pool.clone(),
+            self.deps.api_event_tx.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();

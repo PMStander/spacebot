@@ -47,6 +47,7 @@
 		"graphology": "^0.26.0",
 		"graphology-layout-forceatlas2": "^0.10.1",
 		"graphology-types": "^0.24.8",
+		"mermaid": "^11.12.3",
 		"papaparse": "^5.5.3",
 		"prosemirror-example-setup": "^1.2.3",
 		"prosemirror-inputrules": "^1.5.1",

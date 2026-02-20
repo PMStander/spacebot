@@ -1186,6 +1186,7 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            api_event_tx: Some(api_state.event_tx.clone()),
         };
 
         let agent = spacebot::Agent {
@@ -1276,8 +1277,12 @@ async fn initialize_agents(
                     .expect("slack permissions initialized when slack is enabled"),
                 slack_config.commands.clone(),
             ) {
-                Ok(adapter) => { new_messaging_manager.register(adapter).await; }
-                Err(error) => { tracing::error!(%error, "failed to build slack adapter"); }
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build slack adapter");
+                }
             }
         }
     }
@@ -1334,7 +1339,9 @@ async fn initialize_agents(
     }
 
     let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new());
-    new_messaging_manager.register_shared(webchat_adapter.clone()).await;
+    new_messaging_manager
+        .register_shared(webchat_adapter.clone())
+        .await;
     api_state.set_webchat_adapter(webchat_adapter);
 
     *messaging_manager = Arc::new(new_messaging_manager);
@@ -1469,14 +1476,71 @@ async fn initialize_agents(
                 brave_search_key,
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.runtime_config.instance_dir.clone(),
+                agent.db.sqlite.clone(),
+                agent_id.to_string(),
+                api_state.event_tx.clone(),
             );
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
-            let session = spacebot::agent::cortex_chat::CortexChatSession::new(
+
+            // Create a dedicated "Cortex Workers" internal channel for background workers
+            let worker_channel_id = format!("internal:cortex-workers-{}", agent_id);
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO channels \
+                 (id, platform, display_name, platform_meta, last_activity_at) \
+                 VALUES (?, 'internal', 'Cortex Workers', NULL, CURRENT_TIMESTAMP)",
+            )
+            .bind(&worker_channel_id)
+            .execute(&agent.db.sqlite)
+            .await;
+
+            let worker_status_block = std::sync::Arc::new(tokio::sync::RwLock::new(
+                spacebot::agent::status::StatusBlock::new(),
+            ));
+            let worker_channel_state = spacebot::agent::channel::ChannelState {
+                channel_id: std::sync::Arc::from(worker_channel_id.as_str()),
+                history: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                active_branches: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                active_workers: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                worker_handles: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                worker_inputs: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                status_block: worker_status_block.clone(),
+                deps: agent.deps.clone(),
+                conversation_logger: spacebot::conversation::history::ConversationLogger::new(
+                    agent.db.sqlite.clone(),
+                ),
+                process_run_logger: spacebot::conversation::history::ProcessRunLogger::new(
+                    agent.db.sqlite.clone(),
+                ),
+                channel_store: spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone()),
+                screenshot_dir: agent.config.screenshot_dir(),
+                logs_dir: agent.config.logs_dir(),
+            };
+
+            // Register with ApiState so the channel appears in the sidebar
+            api_state
+                .register_channel_status(worker_channel_id.clone(), worker_status_block)
+                .await;
+            api_state
+                .register_channel_state(worker_channel_id.clone(), worker_channel_state.clone())
+                .await;
+
+            let session = spacebot::agent::cortex_chat::CortexChatSession::new_with_workers(
                 agent.deps.clone(),
                 tool_server,
                 store,
+                worker_channel_state,
             );
-            sessions.insert(agent_id.to_string(), std::sync::Arc::new(session));
+            let session_arc = std::sync::Arc::new(session);
+            session_arc.start_worker_watcher();
+            sessions.insert(agent_id.to_string(), session_arc);
         }
         api_state.set_cortex_chat_sessions(sessions);
         tracing::info!("cortex chat sessions initialized");

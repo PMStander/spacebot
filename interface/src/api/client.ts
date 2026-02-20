@@ -104,6 +104,44 @@ export interface ToolCompletedEvent {
 	tool_name: string;
 }
 
+export interface CanvasUpdatedEvent {
+	type: "canvas_updated";
+	agent_id: string;
+	panel_name: string;
+}
+
+export interface CanvasRemovedEvent {
+	type: "canvas_removed";
+	agent_id: string;
+	panel_name: string;
+}
+
+export interface CanvasPanel {
+	id: string;
+	name: string;
+	title: string;
+	content: string;
+	position: number;
+	metadata: { span?: number; height?: number } | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface CanvasPanelsResponse {
+	panels: CanvasPanel[];
+}
+
+export interface WebChatAttachmentRef {
+	filename: string;
+	mime_type: string;
+	path: string;
+	size_bytes: number;
+}
+
+export interface WebChatUploadResponse {
+	attachments: WebChatAttachmentRef[];
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -114,7 +152,9 @@ export type ApiEvent =
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ToolStartedEvent
-	| ToolCompletedEvent;
+	| ToolCompletedEvent
+	| CanvasUpdatedEvent
+	| CanvasRemovedEvent;
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`, init);
@@ -1043,6 +1083,22 @@ export const api = {
 				channel_id: channelId ?? null,
 			}),
 		}),
+	cortexChatSpawnWorker: (
+		agentId: string,
+		threadId: string,
+		task: string,
+		skill?: string,
+	): Promise<{ worker_id: string; task: string }> =>
+		fetchJson(`/cortex-chat/worker`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: agentId,
+				thread_id: threadId,
+				task,
+				skill: skill ?? null,
+			}),
+		}),
 	agentProfile: (agentId: string) =>
 		fetchJson<AgentProfileResponse>(`/agents/profile?agent_id=${encodeURIComponent(agentId)}`),
 	agentIdentity: (agentId: string) =>
@@ -1386,7 +1442,13 @@ export const api = {
 		),
 
 	// Web Chat API
-	webChatSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>
+	webChatSend: (
+		agentId: string,
+		sessionId: string,
+		message: string,
+		senderName?: string,
+		attachments: WebChatAttachmentRef[] = [],
+	) =>
 		fetch(`${API_BASE}/webchat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1395,8 +1457,25 @@ export const api = {
 				session_id: sessionId,
 				sender_name: senderName ?? "user",
 				message,
+				attachments,
 			}),
 		}),
+
+	webChatUpload: async (agentId: string, files: File[]) => {
+		const formData = new FormData();
+		for (const file of files) {
+			formData.append("files", file);
+		}
+
+		const response = await fetch(
+			`${API_BASE}/webchat/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<WebChatUploadResponse>;
+	},
 
 	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
@@ -1449,4 +1528,8 @@ export const api = {
 
 	deleteArtifact: (agentId: string, artifactId: string) =>
 		fetch(`${API_BASE}/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`, { method: "DELETE" }),
+
+	// Canvas API
+	canvasPanels: (agentId: string) =>
+		fetchJson<CanvasPanelsResponse>(`/canvas/panels?agent_id=${encodeURIComponent(agentId)}`),
 };

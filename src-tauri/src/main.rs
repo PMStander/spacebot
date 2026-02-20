@@ -1,10 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use futures::StreamExt as _;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 fn main() {
@@ -39,8 +39,7 @@ fn main() {
 }
 
 async fn start_server() -> anyhow::Result<()> {
-    let config = spacebot::config::Config::load()
-        .context("failed to load configuration")?;
+    let config = spacebot::config::Config::load().context("failed to load configuration")?;
 
     let _otel_provider = spacebot::daemon::init_foreground_tracing(false, &config.telemetry);
 
@@ -60,10 +59,14 @@ async fn start_server() -> anyhow::Result<()> {
     // Channel for newly created agents to be registered in the main event loop
     let (agent_tx, mut agent_rx) = mpsc::channel::<spacebot::Agent>(8);
 
+    // Channel for removing agents from the main event loop
+    let (agent_remove_tx, mut agent_remove_rx) = mpsc::channel::<String>(8);
+
     // Start HTTP API server if enabled
     let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(
         provider_tx,
         agent_tx,
+        agent_remove_tx,
     ));
 
     // Start background update checker
@@ -160,6 +163,7 @@ async fn start_server() -> anyhow::Result<()> {
         let mut discord_permissions = None;
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
+        let mut twitch_permissions = None;
         initialize_agents(
             &config,
             &llm_manager,
@@ -176,6 +180,7 @@ async fn start_server() -> anyhow::Result<()> {
             &mut discord_permissions,
             &mut slack_permissions,
             &mut telegram_permissions,
+            &mut twitch_permissions,
         )
         .await?;
         agents_initialized = true;
@@ -188,8 +193,10 @@ async fn start_server() -> anyhow::Result<()> {
             discord_permissions,
             slack_permissions,
             telegram_permissions,
+            twitch_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
+            llm_manager.clone(),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -200,8 +207,10 @@ async fn start_server() -> anyhow::Result<()> {
             None,
             None,
             None,
+            None,
             bindings.clone(),
             None,
+            llm_manager.clone(),
         );
     }
 
@@ -426,6 +435,14 @@ async fn start_server() -> anyhow::Result<()> {
                 tracing::info!(agent_id = %agent.id, "registering new agent in main loop");
                 agents.insert(agent.id.clone(), agent);
             }
+            Some(agent_id) = agent_remove_rx.recv() => {
+                let key: spacebot::AgentId = Arc::from(agent_id.as_str());
+                if agents.remove(&key).is_some() {
+                    tracing::info!(agent_id = %agent_id, "removed agent from main loop");
+                } else {
+                    tracing::warn!(agent_id = %agent_id, "agent not found in main loop for removal");
+                }
+            }
             Some(event) = provider_rx.recv(), if !agents_initialized => {
                 // Reload config from disk
                 let new_config = if config_path.exists() {
@@ -449,6 +466,7 @@ async fn start_server() -> anyhow::Result<()> {
                                         let mut new_discord_permissions = None;
                                         let mut new_slack_permissions = None;
                                         let mut new_telegram_permissions = None;
+                                        let mut new_twitch_permissions = None;
                                         match initialize_agents(
                                             &new_config,
                                             &new_llm_manager,
@@ -465,6 +483,7 @@ async fn start_server() -> anyhow::Result<()> {
                                             &mut new_discord_permissions,
                                             &mut new_slack_permissions,
                                             &mut new_telegram_permissions,
+                                            &mut new_twitch_permissions,
                                         ).await {
                                             Ok(()) => {
                                                 agents_initialized = true;
@@ -475,8 +494,10 @@ async fn start_server() -> anyhow::Result<()> {
                                                     new_discord_permissions,
                                                     new_slack_permissions,
                                                     new_telegram_permissions,
+                                                    new_twitch_permissions,
                                                     bindings.clone(),
                                                     Some(messaging_manager.clone()),
+                                                    new_llm_manager.clone(),
                                                 );
                                                 tracing::info!("agents initialized after provider setup");
                                             }
@@ -505,6 +526,7 @@ async fn start_server() -> anyhow::Result<()> {
                             let mut new_discord_permissions = None;
                             let mut new_slack_permissions = None;
                             let mut new_telegram_permissions = None;
+                            let mut new_twitch_permissions = None;
                             match initialize_agents(
                                 &new_config,
                                 &llm_manager,
@@ -521,6 +543,7 @@ async fn start_server() -> anyhow::Result<()> {
                                 &mut new_discord_permissions,
                                 &mut new_slack_permissions,
                                 &mut new_telegram_permissions,
+                                &mut new_twitch_permissions,
                             ).await {
                                 Ok(()) => {
                                     _file_watcher = spacebot::config::spawn_file_watcher(
@@ -530,8 +553,10 @@ async fn start_server() -> anyhow::Result<()> {
                                         new_discord_permissions,
                                         new_slack_permissions,
                                         new_telegram_permissions,
+                                        new_twitch_permissions,
                                         bindings.clone(),
                                         Some(messaging_manager.clone()),
+                                        llm_manager.clone(),
                                     );
                                     tracing::info!("agents reinitialized after new agent creation");
                                 }
@@ -616,6 +641,7 @@ async fn initialize_agents(
     discord_permissions: &mut Option<Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
+    twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
@@ -753,6 +779,7 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            api_event_tx: Some(api_state.event_tx.clone()),
         };
 
         let agent = spacebot::Agent {
@@ -841,7 +868,9 @@ async fn initialize_agents(
                 slack_permissions
                     .clone()
                     .expect("slack permissions initialized when slack is enabled"),
-            );
+                slack_config.commands.clone(),
+            )
+            .expect("failed to create Slack adapter");
             new_messaging_manager.register(adapter).await;
         }
     }
@@ -860,6 +889,28 @@ async fn initialize_agents(
                 telegram_permissions
                     .clone()
                     .expect("telegram permissions initialized when telegram is enabled"),
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+    }
+
+    // Shared Twitch permissions (hot-reloadable via file watcher)
+    *twitch_permissions = config.messaging.twitch.as_ref().map(|twitch_config| {
+        let perms =
+            spacebot::config::TwitchPermissions::from_config(twitch_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(twitch_config) = &config.messaging.twitch {
+        if twitch_config.enabled {
+            let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
+                &twitch_config.username,
+                &twitch_config.oauth_token,
+                twitch_config.channels.clone(),
+                twitch_config.trigger_prefix.clone(),
+                twitch_permissions
+                    .clone()
+                    .expect("twitch permissions initialized when twitch is enabled"),
             );
             new_messaging_manager.register(adapter).await;
         }
@@ -1006,14 +1057,70 @@ async fn initialize_agents(
                 brave_search_key,
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.runtime_config.instance_dir.clone(),
+                agent.db.sqlite.clone(),
+                agent_id.to_string(),
+                api_state.event_tx.clone(),
             );
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
-            let session = spacebot::agent::cortex_chat::CortexChatSession::new(
+
+            // Create a dedicated "Cortex Workers" internal channel for background workers
+            let worker_channel_id = format!("internal:cortex-workers-{}", agent_id);
+            let _ = sqlx::query(
+                "INSERT OR IGNORE INTO channels \
+                 (id, platform, display_name, platform_meta, last_activity_at) \
+                 VALUES (?, 'internal', 'Cortex Workers', NULL, CURRENT_TIMESTAMP)",
+            )
+            .bind(&worker_channel_id)
+            .execute(&agent.db.sqlite)
+            .await;
+
+            let worker_status_block = std::sync::Arc::new(tokio::sync::RwLock::new(
+                spacebot::agent::status::StatusBlock::new(),
+            ));
+            let worker_channel_state = spacebot::agent::channel::ChannelState {
+                channel_id: std::sync::Arc::from(worker_channel_id.as_str()),
+                history: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+                active_branches: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                active_workers: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                worker_handles: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                worker_inputs: std::sync::Arc::new(tokio::sync::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
+                status_block: worker_status_block.clone(),
+                deps: agent.deps.clone(),
+                conversation_logger: spacebot::conversation::history::ConversationLogger::new(
+                    agent.db.sqlite.clone(),
+                ),
+                process_run_logger: spacebot::conversation::history::ProcessRunLogger::new(
+                    agent.db.sqlite.clone(),
+                ),
+                channel_store: spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone()),
+                screenshot_dir: agent.config.screenshot_dir(),
+                logs_dir: agent.config.logs_dir(),
+            };
+
+            api_state
+                .register_channel_status(worker_channel_id.clone(), worker_status_block)
+                .await;
+            api_state
+                .register_channel_state(worker_channel_id.clone(), worker_channel_state.clone())
+                .await;
+
+            let session = spacebot::agent::cortex_chat::CortexChatSession::new_with_workers(
                 agent.deps.clone(),
                 tool_server,
                 store,
+                worker_channel_state,
             );
-            sessions.insert(agent_id.to_string(), std::sync::Arc::new(session));
+            let session_arc = std::sync::Arc::new(session);
+            session_arc.start_worker_watcher();
+            sessions.insert(agent_id.to_string(), session_arc);
         }
         api_state.set_cortex_chat_sessions(sessions);
         tracing::info!("cortex chat sessions initialized");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "@/api/client";
+import { api, type WebChatAttachmentRef } from "@/api/client";
 
 export interface ToolActivity {
 	tool: string;
@@ -48,7 +48,7 @@ async function consumeSSE(
 }
 
 export function useWebChat(agentId: string) {
-	const sessionId = "portal:chat";
+	const [sessionId, setSessionId] = useState(`portal:chat:${agentId}`);
 	const [messages, setMessages] = useState<WebChatMessage[]>([]);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -67,7 +67,7 @@ export function useWebChat(agentId: string) {
 					history.map((m) => ({
 						id: m.id,
 						role: m.role as "user" | "assistant",
-						content: m.content,
+						content: m.content || "[attachment]",
 					})),
 				);
 			} catch { /* ignore — fresh session */ }
@@ -75,25 +75,35 @@ export function useWebChat(agentId: string) {
 		return () => { cancelled = true; };
 	}, [agentId, sessionId]);
 
-	const sendMessage = useCallback(async (text: string) => {
+	const sendMessage = useCallback(async (text: string, attachments: WebChatAttachmentRef[] = []) => {
 		if (isStreaming) return;
+		if (!text.trim() && attachments.length === 0) return;
 
 		setError(null);
 		setIsStreaming(true);
 		setToolActivity([]);
 		streamingTextRef.current = "";
 
+		const contentParts: string[] = [];
+		if (text.trim()) {
+			contentParts.push(text.trim());
+		}
+		if (attachments.length > 0) {
+			const labels = attachments.map((attachment) => attachment.filename).join(", ");
+			contentParts.push(`[attachments: ${labels}]`);
+		}
+
 		const userMessage: WebChatMessage = {
 			id: `user-${Date.now()}`,
 			role: "user",
-			content: text,
+			content: contentParts.join("\n"),
 		};
 		setMessages((prev) => [...prev, userMessage]);
 
 		const assistantId = `assistant-${Date.now()}`;
 
 		try {
-			const response = await api.webChatSend(agentId, sessionId, text);
+			const response = await api.webChatSend(agentId, sessionId, text, undefined, attachments);
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
@@ -159,5 +169,13 @@ export function useWebChat(agentId: string) {
 		}
 	}, [agentId, sessionId, isStreaming]);
 
-	return { messages, isStreaming, error, toolActivity, sendMessage };
+	const clearChat = useCallback(() => {
+		const newSessionId = `portal:chat:${agentId}:${Date.now()}`;
+		setSessionId(newSessionId);
+		setMessages([]);
+		setError(null);
+		setToolActivity([]);
+	}, [agentId]);
+
+	return { messages, sessionId, isStreaming, error, toolActivity, sendMessage, clearChat };
 }
