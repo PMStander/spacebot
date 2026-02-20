@@ -673,6 +673,9 @@ export interface ProviderStatus {
 	ollama: boolean;
 	opencode_zen: boolean;
 	nvidia: boolean;
+	minimax: boolean;
+	moonshot: boolean;
+	zai_coding_plan: boolean;
 }
 
 export interface ProvidersResponse {
@@ -794,6 +797,7 @@ export interface MessagingStatusResponse {
 	slack: PlatformStatus;
 	telegram: PlatformStatus;
 	webhook: PlatformStatus;
+	twitch: PlatformStatus;
 }
 
 export interface BindingInfo {
@@ -822,6 +826,8 @@ export interface CreateBindingRequest {
 		discord_token?: string;
 		slack_bot_token?: string;
 		slack_app_token?: string;
+		twitch_username?: string;
+		twitch_oauth_token?: string;
 	};
 }
 
@@ -1062,6 +1068,17 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<{ success: boolean; agent_id: string; message: string }>;
+	},
+
+	deleteAgent: async (agentId: string) => {
+		const params = new URLSearchParams({ agent_id: agentId });
+		const response = await fetch(`${API_BASE}/agents?${params}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean; message: string }>;
 	},
 
 	agentConfig: (agentId: string) =>
@@ -1367,6 +1384,22 @@ export const api = {
 		fetchJson<RegistrySearchResponse>(
 			`/skills/registry/search?q=${encodeURIComponent(query)}&limit=${limit}`,
 		),
+
+	// Web Chat API
+	webChatSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>
+		fetch(`${API_BASE}/webchat/send`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: agentId,
+				session_id: sessionId,
+				sender_name: senderName ?? "user",
+				message,
+			}),
+		}),
+
+	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
+		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
 	eventsUrl: `${API_BASE}/events`,
 

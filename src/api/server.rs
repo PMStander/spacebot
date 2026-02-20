@@ -1,7 +1,7 @@
 //! HTTP server setup: router, static file serving, and API route wiring.
 
 use super::state::ApiState;
-use super::{agents, artifacts, bindings, channels, config, cortex, cron, ingest, local_file, memories, messaging, models, providers, settings, skills, system, workers};
+use super::{agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models, providers, settings, skills, system, webchat};
 
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -39,7 +39,7 @@ pub async fn start_http_server(
         .route("/status", get(system::status))
         .route("/overview", get(agents::instance_overview))
         .route("/events", get(system::events_sse))
-        .route("/agents", get(agents::list_agents).post(agents::create_agent))
+        .route("/agents", get(agents::list_agents).post(agents::create_agent).delete(agents::delete_agent))
         .route("/agents/overview", get(agents::agent_overview))
         .route("/channels", get(channels::list_channels).post(channels::create_internal_channel).patch(channels::rename_channel).delete(channels::delete_channel))
         .route("/channels/messages", get(channels::channel_messages))
@@ -80,9 +80,8 @@ pub async fn start_http_server(
         .route("/config/raw", get(settings::get_raw_config).put(settings::update_raw_config))
         .route("/update/check", get(settings::update_check).post(settings::update_check_now))
         .route("/update/apply", post(settings::update_apply))
-        .route("/agents/artifacts", get(artifacts::list_artifacts).post(artifacts::create_artifact))
-        .route("/agents/artifacts/{id}", get(artifacts::get_artifact).put(artifacts::update_artifact).delete(artifacts::delete_artifact))
-        .route("/local-file", get(local_file::serve_local_file));
+        .route("/webchat/send", post(webchat::webchat_send))
+        .route("/webchat/history", get(webchat::webchat_history));
 
     let app = Router::new()
         .nest("/api", api_routes)

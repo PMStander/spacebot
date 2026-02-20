@@ -96,11 +96,12 @@ const PROVIDERS = [
 		defaultModel: "gpt-4.1",
 	},
 	{
-		id: "zhipu-sub",
-		name: "Z.ai Subscription",
-		description: "GLM models via Z.ai coding subscription plan",
+		id: "zai-coding-plan",
+		name: "Z.AI Coding Plan",
+		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
 		placeholder: "...",
-		envVar: "ZHIPU_SUB_API_KEY",
+		envVar: "ZAI_CODING_PLAN_API_KEY",
+		defaultModel: "glm-5",
 	},
 	{
 		id: "zhipu",
@@ -165,6 +166,22 @@ const PROVIDERS = [
 		placeholder: "nvapi-...",
 		envVar: "NVIDIA_API_KEY",
 		defaultModel: "nvidia/meta/llama-3.1-405b-instruct",
+	},
+	{
+		id: "minimax",
+		name: "MiniMax",
+		description: "MiniMax M1 (Anthropic message format)",
+		placeholder: "eyJ...",
+		envVar: "MINIMAX_API_KEY",
+		defaultModel: "MiniMax-M1-80k",
+	},
+	{
+		id: "moonshot",
+		name: "Moonshot AI",
+		description: "Kimi models (Kimi K2, Kimi K2.5)",
+		placeholder: "sk-...",
+		envVar: "MOONSHOT_API_KEY",
+		defaultModel: "kimi-k2.5",
 	},
 	{
 		id: "ollama",
@@ -448,6 +465,7 @@ function ChannelsSection() {
 		{platform: "discord" as const, name: "Discord", description: "Discord bot integration"},
 		{platform: "slack" as const, name: "Slack", description: "Slack bot integration"},
 		{platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration"},
+		{platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration"},
 		{platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver"},
 	] as const;
 

@@ -29,6 +29,7 @@ export function platformIcon(platform: string): string {
 		case "discord": return "Discord";
 		case "slack": return "Slack";
 		case "telegram": return "Telegram";
+		case "twitch": return "Twitch";
 		case "webhook": return "Webhook";
 		case "cron": return "Cron";
 		case "internal": return "Chat";
@@ -41,6 +42,7 @@ export function platformColor(platform: string): string {
 		case "discord": return "bg-indigo-500/20 text-indigo-400";
 		case "slack": return "bg-green-500/20 text-green-400";
 		case "telegram": return "bg-blue-500/20 text-blue-400";
+		case "twitch": return "bg-purple-500/20 text-purple-400";
 		case "cron": return "bg-amber-500/20 text-amber-400";
 		case "internal": return "bg-purple-500/20 text-purple-400";
 		default: return "bg-gray-500/20 text-gray-400";
