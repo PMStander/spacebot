@@ -46,12 +46,40 @@ export const BOOK_TYPE_DEFAULTS: Record<
 		panelLabel: "Page",
 		defaultBorderRadius: 8,
 	},
+	kids: {
+		defaultBubbleType: "narration",
+		defaultFont: "Comic Sans MS",
+		allowedBubbleTypes: ["speech", "narration"],
+		panelLabel: "Page",
+		defaultBorderRadius: 8,
+	},
+	novel: {
+		defaultBubbleType: "narration",
+		defaultFont: "Georgia",
+		allowedBubbleTypes: ["narration"],
+		panelLabel: "Chapter page",
+		defaultBorderRadius: 4,
+	},
 	"illustrated-novel": {
 		defaultBubbleType: "narration",
 		defaultFont: "Georgia",
 		allowedBubbleTypes: ["narration"],
 		panelLabel: "Illustration",
 		defaultBorderRadius: 4,
+	},
+	puzzle: {
+		defaultBubbleType: "narration",
+		defaultFont: "Verdana",
+		allowedBubbleTypes: ["narration"],
+		panelLabel: "Puzzle page",
+		defaultBorderRadius: 6,
+	},
+	drawing: {
+		defaultBubbleType: "narration",
+		defaultFont: "Arial",
+		allowedBubbleTypes: ["narration"],
+		panelLabel: "Lesson page",
+		defaultBorderRadius: 8,
 	},
 };
 

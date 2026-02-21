@@ -19,7 +19,7 @@ import type { BookMetadata } from "./types";
 export const bookArtifact = new Artifact<"book", BookMetadata>({
 	kind: "book",
 	description:
-		"Illustrated book creator for comics, children's books, and graphic novels. Supports speech bubble editing, page management, and publishing export.",
+		"Shared book editor for comic, kids, novel, puzzle, and drawing workflows. Supports page editing, speech bubbles for comics, and YOLO/guided creation modes.",
 
 	initialize: ({ setMetadata }) => {
 		setMetadata(DEFAULT_BOOK_METADATA);
@@ -122,26 +122,35 @@ export const bookArtifact = new Artifact<"book", BookMetadata>({
 	toolbar: [
 		{
 			icon: createElement(HugeiconsIcon, { icon: SparklesIcon, size: 16 }),
-			description: "Regenerate current page with AI",
+			description: "YOLO autopilot",
 			onClick: ({ sendMessage }) => {
 				sendMessage(
-					"Please regenerate the current page with improved artwork and composition.",
+					"Run a YOLO autopilot pass for this book. For comics, regenerate only unlocked panels and keep scene.approved=true panels locked. For non-comic books, fill missing page content and run a full consistency polish in one pass.",
+				);
+			},
+		},
+		{
+			icon: createElement(HugeiconsIcon, { icon: ViewIcon, size: 16 }),
+			description: "Guided walkthrough",
+			onClick: ({ sendMessage }) => {
+				sendMessage(
+					"Switch this book to guided mode. Walk page-by-page with me, ask for approval before finalizing each page, and use any references I upload.",
 				);
 			},
 		},
 		{
 			icon: createElement(HugeiconsIcon, { icon: AddCircleIcon, size: 16 }),
-			description: "Add more pages",
+			description: "Extend page count",
 			onClick: ({ sendMessage }) => {
 				sendMessage("Please add 2 more pages to continue the story.");
 			},
 		},
 		{
 			icon: createElement(HugeiconsIcon, { icon: Move01Icon, size: 16 }),
-			description: "Change art style",
+			description: "Shift style/voice",
 			onClick: ({ sendMessage }) => {
 				sendMessage(
-					"Please suggest a different art style for this book and regenerate the pages.",
+					"Please suggest a better style/voice direction for this book type and apply it across all pages.",
 				);
 			},
 		},

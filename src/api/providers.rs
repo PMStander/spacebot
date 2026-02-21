@@ -23,6 +23,7 @@ pub(super) struct ProviderStatus {
     minimax: bool,
     moonshot: bool,
     zai_coding_plan: bool,
+    gemini: bool,
 }
 
 #[derive(Serialize)]
@@ -64,6 +65,7 @@ pub(super) async fn get_providers(
         minimax,
         moonshot,
         zai_coding_plan,
+        gemini,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -102,6 +104,7 @@ pub(super) async fn get_providers(
             has_key("minimax_key", "MINIMAX_API_KEY"),
             has_key("moonshot_key", "MOONSHOT_API_KEY"),
             has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
+            has_key("gemini_key", "GEMINI_API_KEY"),
         )
     } else {
         (
@@ -120,6 +123,7 @@ pub(super) async fn get_providers(
             std::env::var("MINIMAX_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
+            std::env::var("GEMINI_API_KEY").is_ok(),
         )
     };
 
@@ -139,6 +143,7 @@ pub(super) async fn get_providers(
         minimax,
         moonshot,
         zai_coding_plan,
+        gemini,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -154,7 +159,8 @@ pub(super) async fn get_providers(
         || providers.opencode_zen
         || providers.minimax
         || providers.moonshot
-        || providers.zai_coding_plan;
+        || providers.zai_coding_plan
+        || providers.gemini;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -179,6 +185,7 @@ pub(super) async fn update_provider(
         "minimax" => "minimax_key",
         "moonshot" => "moonshot_key",
         "zai-coding-plan" => "zai_coding_plan_key",
+        "gemini" => "gemini_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -256,6 +263,7 @@ pub(super) async fn update_provider(
             "minimax" => has_provider_key("minimax_key", "MINIMAX_API_KEY"),
             "moonshot" => has_provider_key("moonshot_key", "MOONSHOT_API_KEY"),
             "zai-coding-plan" => has_provider_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
+            "gemini" => has_provider_key("gemini_key", "GEMINI_API_KEY"),
             _ => false,
         };
 
@@ -332,6 +340,7 @@ pub(super) async fn delete_provider(
         "minimax" => "minimax_key",
         "moonshot" => "moonshot_key",
         "zai-coding-plan" => "zai_coding_plan_key",
+        "gemini" => "gemini_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,

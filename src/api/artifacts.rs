@@ -1,8 +1,8 @@
 use super::state::ApiState;
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -110,17 +110,20 @@ pub(super) async fn list_artifacts(
 
     // Bind parameters dynamically
     let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-    let mut select_query = sqlx::query_as::<_, (
-        String,
-        Option<String>,
-        String,
-        String,
-        String,
-        Option<String>,
-        i64,
-        String,
-        String,
-    )>(&select_sql);
+    let mut select_query = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            String,
+            String,
+        ),
+    >(&select_sql);
 
     if let Some(ref channel_id) = query.channel_id {
         count_query = count_query.bind(channel_id);
@@ -168,17 +171,20 @@ pub(super) async fn get_artifact(
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
-    let row = sqlx::query_as::<_, (
-        String,
-        Option<String>,
-        String,
-        String,
-        String,
-        Option<String>,
-        i64,
-        String,
-        String,
-    )>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            String,
+            String,
+        ),
+    >(
         "SELECT id, channel_id, kind, title, content, metadata, version, created_at, updated_at \
          FROM artifacts WHERE id = ?",
     )
@@ -346,9 +352,7 @@ pub fn detect_artifact_kind(content: &str) -> Option<&'static str> {
             }
 
             // Chart: has "series" array and "xKey"
-            if val.get("series").and_then(|v| v.as_array()).is_some()
-                && val.get("xKey").is_some()
-            {
+            if val.get("series").and_then(|v| v.as_array()).is_some() && val.get("xKey").is_some() {
                 return Some("chart");
             }
 

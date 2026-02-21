@@ -28,6 +28,7 @@ export interface InboundMessageEvent {
 	type: "inbound_message";
 	agent_id: string;
 	channel_id: string;
+	sender_name?: string | null;
 	sender_id: string;
 	text: string;
 }
@@ -116,6 +117,15 @@ export interface CanvasRemovedEvent {
 	panel_name: string;
 }
 
+export interface ArtifactCreatedEvent {
+	type: "artifact_created";
+	agent_id: string;
+	channel_id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+}
+
 export interface CanvasPanel {
 	id: string;
 	name: string;
@@ -142,6 +152,18 @@ export interface WebChatUploadResponse {
 	attachments: WebChatAttachmentRef[];
 }
 
+export interface CortexChatAttachmentRef {
+	id?: string;
+	filename: string;
+	mime_type: string;
+	path: string;
+	size_bytes: number;
+}
+
+export interface CortexChatUploadResponse {
+	attachments: CortexChatAttachmentRef[];
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -154,7 +176,8 @@ export type ApiEvent =
 	| ToolStartedEvent
 	| ToolCompletedEvent
 	| CanvasUpdatedEvent
-	| CanvasRemovedEvent;
+	| CanvasRemovedEvent
+	| ArtifactCreatedEvent;
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`, init);
@@ -193,7 +216,16 @@ export interface TimelineWorkerRun {
 	completed_at: string | null;
 }
 
-export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun;
+export interface TimelineArtifactNotice {
+	type: "artifact_notice";
+	id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+	created_at: string;
+}
+
+export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun | TimelineArtifactNotice;
 
 export interface MessagesResponse {
 	items: TimelineItem[];
@@ -249,6 +281,7 @@ export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
 export interface AgentInfo {
 	id: string;
+	group: string | null;
 	workspace: string;
 	context_window: number;
 	max_turns: number;
@@ -266,6 +299,7 @@ export interface CronJobInfo {
 	interval_secs: number;
 	delivery_target: string;
 	enabled: boolean;
+	run_once: boolean;
 	active_hours: [number, number] | null;
 }
 
@@ -299,6 +333,7 @@ export interface AgentProfileResponse {
 
 export interface AgentSummary {
 	id: string;
+	group: string | null;
 	channel_count: number;
 	memory_total: number;
 	cron_job_count: number;
@@ -517,6 +552,11 @@ export interface RoutingSection {
 	compactor: string;
 	cortex: string;
 	rate_limit_cooldown_secs: number;
+	channel_thinking_effort: string;
+	branch_thinking_effort: string;
+	worker_thinking_effort: string;
+	compactor_thinking_effort: string;
+	cortex_thinking_effort: string;
 }
 
 export interface TuningSection {
@@ -587,6 +627,11 @@ export interface RoutingUpdate {
 	compactor?: string;
 	cortex?: string;
 	rate_limit_cooldown_secs?: number;
+	channel_thinking_effort?: string;
+	branch_thinking_effort?: string;
+	worker_thinking_effort?: string;
+	compactor_thinking_effort?: string;
+	cortex_thinking_effort?: string;
 }
 
 export interface TuningUpdate {
@@ -657,6 +702,7 @@ export interface CronJobWithStats {
 	interval_secs: number;
 	delivery_target: string;
 	enabled: boolean;
+	run_once: boolean;
 	active_hours: [number, number] | null;
 	success_count: number;
 	failure_count: number;
@@ -691,6 +737,7 @@ export interface CreateCronRequest {
 	active_start_hour?: number;
 	active_end_hour?: number;
 	enabled: boolean;
+	run_once: boolean;
 }
 
 export interface CronExecutionsParams {
@@ -726,6 +773,14 @@ export interface ProvidersResponse {
 export interface ProviderActionResponse {
 	success: boolean;
 	message: string;
+}
+
+export interface ProviderModelTestResponse {
+	success: boolean;
+	message: string;
+	provider: string;
+	model: string;
+	sample: string | null;
 }
 
 // -- Model Types --
@@ -847,6 +902,7 @@ export interface BindingInfo {
 	workspace_id: string | null;
 	chat_id: string | null;
 	channel_ids: string[];
+	require_mention: boolean;
 	dm_allowed_users: string[];
 }
 
@@ -861,6 +917,7 @@ export interface CreateBindingRequest {
 	workspace_id?: string;
 	chat_id?: string;
 	channel_ids?: string[];
+	require_mention?: boolean;
 	dm_allowed_users?: string[];
 	platform_credentials?: {
 		discord_token?: string;
@@ -889,6 +946,7 @@ export interface UpdateBindingRequest {
 	workspace_id?: string;
 	chat_id?: string;
 	channel_ids?: string[];
+	require_mention?: boolean;
 	dm_allowed_users?: string[];
 }
 
@@ -974,7 +1032,20 @@ export interface RawConfigUpdateResponse {
 export interface ArtifactInfo {
 	id: string;
 	channel_id: string | null;
-	kind: "code" | "text" | "image" | "sheet" | "book";
+	kind:
+		| "code"
+		| "text"
+		| "image"
+		| "sheet"
+		| "book"
+		| "html"
+		| "chart"
+		| "diagram"
+		| "checklist"
+		| "form"
+		| "kanban"
+		| "table"
+		| "graph";
 	title: string;
 	content: string;
 	metadata: Record<string, unknown> | null;
@@ -1072,7 +1143,13 @@ export const api = {
 		if (threadId) search.set("thread_id", threadId);
 		return fetchJson<CortexChatMessagesResponse>(`/cortex-chat/messages?${search}`);
 	},
-	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string) =>
+	cortexChatSend: (
+		agentId: string,
+		threadId: string,
+		message: string,
+		channelId?: string,
+		attachments: CortexChatAttachmentRef[] = [],
+	) =>
 		fetch(`${API_BASE}/cortex-chat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1081,8 +1158,24 @@ export const api = {
 				thread_id: threadId,
 				message,
 				channel_id: channelId ?? null,
+				attachments,
 			}),
 		}),
+	cortexChatUpload: async (agentId: string, files: File[]) => {
+		const formData = new FormData();
+		for (const file of files) {
+			formData.append("files", file);
+		}
+
+		const response = await fetch(
+			`${API_BASE}/cortex-chat/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<CortexChatUploadResponse>;
+	},
 	cortexChatSpawnWorker: (
 		agentId: string,
 		threadId: string,
@@ -1223,16 +1316,27 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<ProvidersResponse>("/providers"),
-	updateProvider: async (provider: string, apiKey: string) => {
+	updateProvider: async (provider: string, apiKey: string, model: string) => {
 		const response = await fetch(`${API_BASE}/providers`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey }),
+			body: JSON.stringify({ provider, api_key: apiKey, model }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<ProviderActionResponse>;
+	},
+	testProviderModel: async (provider: string, apiKey: string, model: string) => {
+		const response = await fetch(`${API_BASE}/providers/test`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ provider, api_key: apiKey, model }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<ProviderModelTestResponse>;
 	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${API_BASE}/providers/${encodeURIComponent(provider)}`, {
@@ -1245,7 +1349,10 @@ export const api = {
 	},
 
 	// Model listing
-	models: () => fetchJson<ModelsResponse>("/models"),
+	models: (provider?: string) => {
+		const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+		return fetchJson<ModelsResponse>(`/models${query}`);
+	},
 	refreshModels: async () => {
 		const response = await fetch(`${API_BASE}/models/refresh`, {
 			method: "POST",

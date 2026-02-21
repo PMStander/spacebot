@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
-import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
+import { api, type ChannelInfo, type TimelineItem, type TimelineArtifactNotice, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
 import type { ChannelLiveState, ActiveWorker, ActiveBranch } from "@/hooks/useChannelLiveState";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { ArtifactPanel } from "@/components/ArtifactPanel";
@@ -182,11 +182,37 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 	);
 }
 
-function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
+function ArtifactNoticeItem({ item, onOpenArtifact }: { item: TimelineArtifactNotice; onOpenArtifact: (artifactId: string) => void }) {
+	return (
+		<div className="flex gap-3 px-3 py-2">
+			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
+				{formatTimestamp(new Date(item.created_at).getTime())}
+			</span>
+			<div className="min-w-0 flex-1 rounded-md border border-cyan-500/20 bg-cyan-500/10 px-3 py-2">
+				<div className="flex items-center gap-2">
+					<span className="text-sm font-medium text-cyan-300">Artifact ready</span>
+					<span className="truncate text-sm text-ink-dull">{item.title}</span>
+					<Button
+						type="button"
+						size="sm"
+						variant="ghost"
+						className="ml-auto h-7 border border-cyan-500/30 px-2 text-cyan-300 hover:bg-cyan-500/20"
+						onClick={() => onOpenArtifact(item.artifact_id)}
+					>
+						Open
+					</Button>
+				</div>
+			</div>
+		</div>
+	);
+}
+
+function TimelineEntry({ item, liveWorkers, liveBranches, channelId, onOpenArtifact }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
 	liveBranches: Record<string, ActiveBranch>;
 	channelId: string;
+	onOpenArtifact: (artifactId: string) => void;
 }) {
 	switch (item.type) {
 		case "message":
@@ -221,6 +247,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} />;
 			return <WorkerRunItem item={item} />;
 		}
+		case "artifact_notice":
+			return <ArtifactNoticeItem item={item} onOpenArtifact={onOpenArtifact} />;
 	}
 }
 
@@ -230,10 +258,12 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 	channelId: string;
 	onClose: () => void;
 }) {
-	const { metadata, setMetadata, versions, pushVersion } = useArtifactStore();
+	const { metadata, setMetadata, versions, pushVersion, setArtifact } = useArtifactStore();
 	const { sendMessage } = useCortexChat(agentId, channelId);
 	const [versionIndex, setVersionIndex] = useState(versions.length > 0 ? versions.length - 1 : 0);
 	const [mode, setMode] = useState<"view" | "diff">("view");
+	const persistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const pendingPersistContentRef = useRef<string | null>(null);
 
 	const artifactDef = artifactRegistry.get(artifact.kind);
 
@@ -242,6 +272,12 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 		if (versions.length === 0) {
 			pushVersion(artifact.content);
 		}
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [artifact.id]);
+
+	// Reset the selected version when switching artifacts.
+	useEffect(() => {
+		setVersionIndex(versions.length > 0 ? versions.length - 1 : 0);
 	// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [artifact.id]);
 
@@ -260,16 +296,71 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 		else if (type === "latest") setVersionIndex(versions.length - 1);
 	}, [versions.length]);
 
-	const handleSaveContent = useCallback((updated: string, _debounce: boolean) => {
+	const persistArtifactContent = useCallback(async (updated: string) => {
+		try {
+			const info = await api.updateArtifact(agentId, artifact.id, { content: updated });
+			setArtifact((current) => {
+				if (!current) return current;
+				return {
+					...current,
+					id: info.id,
+					channelId: info.channel_id,
+					kind: info.kind as ArtifactKind,
+					title: info.title,
+					content: info.content,
+					metadata: info.metadata as Record<string, any> | null,
+					version: info.version,
+				};
+			});
+		} catch (error) {
+			console.warn("Failed to persist artifact content:", error);
+		}
+	}, [agentId, artifact.id, setArtifact]);
+
+	const flushPendingPersist = useCallback(() => {
+		if (persistTimeoutRef.current) {
+			clearTimeout(persistTimeoutRef.current);
+			persistTimeoutRef.current = null;
+		}
+		const pendingContent = pendingPersistContentRef.current;
+		pendingPersistContentRef.current = null;
+		if (pendingContent !== null) {
+			void persistArtifactContent(pendingContent);
+		}
+	}, [persistArtifactContent]);
+
+	useEffect(() => flushPendingPersist, [flushPendingPersist]);
+
+	const handleSaveContent = useCallback((updated: string, debounce: boolean) => {
+		const latestContent = versions[versions.length - 1];
 		pushVersion(updated);
-	}, [pushVersion]);
+		setArtifact((current) => (current ? { ...current, content: updated } : current));
+		setVersionIndex(latestContent === updated ? Math.max(versions.length - 1, 0) : versions.length);
+
+		pendingPersistContentRef.current = updated;
+		if (persistTimeoutRef.current) {
+			clearTimeout(persistTimeoutRef.current);
+			persistTimeoutRef.current = null;
+		}
+
+		if (debounce) {
+			persistTimeoutRef.current = setTimeout(() => {
+				flushPendingPersist();
+			}, 700);
+			return;
+		}
+
+		flushPendingPersist();
+	}, [flushPendingPersist, pushVersion, setArtifact, versions]);
 
 	const getVersionContentById = useCallback((index: number): string => {
 		return versions[index] ?? artifact.content;
 	}, [versions, artifact.content]);
 
+	const currentContent = getVersionContentById(versionIndex);
+
 	const actionContext = {
-		content: artifact.content,
+		content: currentContent,
 		handleVersionChange,
 		currentVersionIndex: versionIndex,
 		isCurrentVersion: versionIndex === versions.length - 1 || versions.length === 0,
@@ -318,7 +409,7 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 		<ArtifactPanel title={artifact.title} onClose={onClose} agentId={agentId} actions={<>{actions}</>} toolbar={toolbar && <>{toolbar}</>}>
 			<ContentComponent
 				title={artifact.title}
-				content={artifact.content}
+				content={currentContent}
 				mode={mode}
 				isCurrentVersion={versionIndex === versions.length - 1 || versions.length === 0}
 				currentVersionIndex={versionIndex}
@@ -329,6 +420,7 @@ function ArtifactPanelRenderer({ artifact, agentId, channelId, onClose }: {
 				setMetadata={setMetadata}
 				getVersionContentById={getVersionContentById}
 				sendMessage={sendMessage}
+				agentId={agentId}
 			/>
 		</ArtifactPanel>
 	);
@@ -358,6 +450,24 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	// Delete confirmation state
 	const [confirmDelete, setConfirmDelete] = useState(false);
 	const [deleting, setDeleting] = useState(false);
+	const lastAutoOpenedArtifactId = useRef<string | null>(null);
+	const artifactSeenStorageKey = `spacebot:last-seen-artifact:${agentId}:${channelId}`;
+
+	const getLastSeenArtifactId = useCallback((): string | null => {
+		try {
+			return localStorage.getItem(artifactSeenStorageKey);
+		} catch {
+			return null;
+		}
+	}, [artifactSeenStorageKey]);
+
+	const markArtifactSeen = useCallback((artifactId: string) => {
+		try {
+			localStorage.setItem(artifactSeenStorageKey, artifactId);
+		} catch {
+			// ignore storage failures (private mode, quota, etc.)
+		}
+	}, [artifactSeenStorageKey]);
 
 	const handleRename = useCallback(async () => {
 		const trimmed = nameInput.trim();
@@ -390,7 +500,8 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 		useArtifactStore.getState().clearArtifact();
 		useArtifactStore.getState().setArtifact(art);
 		setPanelKind("artifact");
-	}, []);
+		markArtifactSeen(art.id);
+	}, [markArtifactSeen]);
 
 	// Called when cortex chat emits an artifact_done event
 	const handleArtifactFromCortex = useCallback((payload: ArtifactPayload) => {
@@ -406,6 +517,92 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 			isVisible: true,
 		});
 	}, [channelId, openArtifact]);
+
+	const openArtifactById = useCallback((artifactId: string) => {
+		api.getArtifact(agentId, artifactId)
+			.then((info) => {
+				openArtifact({
+					id: info.id,
+					channelId: info.channel_id,
+					kind: info.kind as ArtifactKind,
+					title: info.title,
+					content: info.content,
+					metadata: info.metadata as Record<string, unknown> | null,
+					version: info.version,
+					status: "idle",
+					isVisible: true,
+				});
+			})
+			.catch((error) => {
+				console.warn("Failed to open artifact from timeline:", error);
+			});
+	}, [agentId, openArtifact]);
+
+	useEffect(() => {
+		const artifact = liveState?.lastArtifact;
+		if (!artifact) return;
+		if (artifact.id === lastAutoOpenedArtifactId.current) return;
+		if (artifact.id === getLastSeenArtifactId()) return;
+
+		lastAutoOpenedArtifactId.current = artifact.id;
+		api.getArtifact(agentId, artifact.id)
+			.then((info) => {
+				openArtifact({
+					id: info.id,
+					channelId: info.channel_id,
+					kind: info.kind as ArtifactKind,
+					title: info.title,
+					content: info.content,
+					metadata: info.metadata as Record<string, unknown> | null,
+					version: info.version,
+					status: "idle",
+					isVisible: true,
+				});
+			})
+			.catch((error) => {
+				console.warn("Failed to auto-open artifact:", error);
+			});
+	}, [agentId, getLastSeenArtifactId, liveState?.lastArtifact, openArtifact]);
+
+	// Re-entry behavior: if a new artifact was created while away, auto-open it on return.
+	useEffect(() => {
+		let cancelled = false;
+
+		const loadLatestArtifact = async () => {
+			try {
+				const response = await api.artifacts(agentId, {
+					channel_id: channelId,
+					kind: "book",
+					limit: 1,
+				});
+				if (cancelled) return;
+
+				const latest = response.artifacts[0];
+				if (!latest) return;
+				if (latest.id === getLastSeenArtifactId()) return;
+
+				lastAutoOpenedArtifactId.current = latest.id;
+				openArtifact({
+					id: latest.id,
+					channelId: latest.channel_id,
+					kind: latest.kind as ArtifactKind,
+					title: latest.title,
+					content: latest.content,
+					metadata: latest.metadata as Record<string, unknown> | null,
+					version: latest.version,
+					status: "idle",
+					isVisible: true,
+				});
+			} catch (error) {
+				console.warn("Failed to load latest channel artifact:", error);
+			}
+		};
+
+		void loadLatestArtifact();
+		return () => {
+			cancelled = true;
+		};
+	}, [agentId, channelId, getLastSeenArtifactId, openArtifact]);
 
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -606,6 +803,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 									liveWorkers={workers}
 									liveBranches={branches}
 									channelId={channelId}
+									onOpenArtifact={openArtifactById}
 								/>
 							))
 						)}

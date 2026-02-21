@@ -96,6 +96,15 @@ const PROVIDERS = [
 		defaultModel: "gpt-4.1",
 	},
 	{
+		id: "gemini",
+		name: "Gemini",
+		description: "Google Gemini models",
+		placeholder: "AIza...",
+		envVar: "GEMINI_API_KEY",
+		defaultModel: "gemini-2.0-flash-exp",
+	},
+
+	{
 		id: "zai-coding-plan",
 		name: "Z.AI Coding Plan",
 		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
@@ -1175,7 +1184,7 @@ function ConfigFileSection() {
 
 	// Initialize CodeMirror when data loads
 	useEffect(() => {
-		if (!data?.content || !editorRef.current || editorLoaded) return;
+		if (data?.content == null || !editorRef.current || editorLoaded) return;
 
 		const content = data.content;
 		setOriginalContent(content);

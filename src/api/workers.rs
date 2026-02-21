@@ -1,8 +1,8 @@
 use super::state::ApiState;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -62,7 +62,18 @@ pub(super) async fn list_worker_runs(
     };
 
     let rows = if has_status_filter {
-        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+            ),
+        >(
             "SELECT id, channel_id, task, result, status, started_at, completed_at \
              FROM worker_runs WHERE status = ?1 ORDER BY started_at DESC LIMIT ?2 OFFSET ?3",
         )
@@ -73,7 +84,18 @@ pub(super) async fn list_worker_runs(
         .await
         .unwrap_or_default()
     } else {
-        sqlx::query_as::<_, (String, Option<String>, String, Option<String>, String, String, Option<String>)>(
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+                String,
+                String,
+                Option<String>,
+            ),
+        >(
             "SELECT id, channel_id, task, result, status, started_at, completed_at \
              FROM worker_runs ORDER BY started_at DESC LIMIT ?1 OFFSET ?2",
         )

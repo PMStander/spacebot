@@ -1,6 +1,6 @@
 use crate::error::Result;
 use anyhow::Context;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -176,13 +176,21 @@ impl PromptEngine {
         browser_enabled: bool,
         web_search_enabled: bool,
         opencode_enabled: bool,
+        cli_workers_enabled: bool,
+        cli_backends: &[(String, String)],
     ) -> Result<String> {
+        let backends: Vec<Value> = cli_backends
+            .iter()
+            .map(|(name, desc)| context! { name => name, description => desc })
+            .collect();
         self.render(
             "fragments/worker_capabilities",
             context! {
                 browser_enabled => browser_enabled,
                 web_search_enabled => web_search_enabled,
                 opencode_enabled => opencode_enabled,
+                cli_workers_enabled => cli_workers_enabled,
+                cli_backends => backends,
             },
         )
     }

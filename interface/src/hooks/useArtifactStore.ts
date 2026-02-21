@@ -24,6 +24,11 @@ export const useArtifactStore = create<ArtifactStore>((set) => ({
 			metadata: typeof updater === "function" ? updater(state.metadata) : updater,
 		})),
 	pushVersion: (content) =>
-		set((state) => ({ versions: [...state.versions, content] })),
+		set((state) => {
+			if (state.versions[state.versions.length - 1] === content) {
+				return {};
+			}
+			return { versions: [...state.versions, content] };
+		}),
 	clearArtifact: () => set({ artifact: null, metadata: {}, versions: [] }),
 }));

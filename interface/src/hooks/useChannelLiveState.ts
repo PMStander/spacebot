@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	api,
+	type ArtifactCreatedEvent,
 	type BranchCompletedEvent,
 	type BranchStartedEvent,
 	type InboundMessageEvent,
@@ -38,6 +39,14 @@ export interface ChannelLiveState {
 	timeline: TimelineItem[];
 	workers: Record<string, ActiveWorker>;
 	branches: Record<string, ActiveBranch>;
+	lastArtifact:
+		| {
+			id: string;
+			kind: string;
+			title: string;
+			createdAt: number;
+		}
+		| null;
 	historyLoaded: boolean;
 	hasMore: boolean;
 	loadingMore: boolean;
@@ -46,7 +55,16 @@ export interface ChannelLiveState {
 const PAGE_SIZE = 50;
 
 function emptyLiveState(): ChannelLiveState {
-	return { isTyping: false, timeline: [], workers: {}, branches: {}, historyLoaded: false, hasMore: true, loadingMore: false };
+	return {
+		isTyping: false,
+		timeline: [],
+		workers: {},
+		branches: {},
+		lastArtifact: null,
+		historyLoaded: false,
+		hasMore: true,
+		loadingMore: false,
+	};
 }
 
 /** Get a sortable timestamp from any timeline item. */
@@ -55,6 +73,7 @@ function itemTimestamp(item: TimelineItem): string {
 		case "message": return item.created_at;
 		case "branch_run": return item.started_at;
 		case "worker_run": return item.started_at;
+		case "artifact_notice": return item.created_at;
 	}
 }
 
@@ -189,7 +208,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			type: "message",
 			id: `in-${Date.now()}-${crypto.randomUUID()}`,
 			role: "user",
-			sender_name: event.sender_id,
+			sender_name: event.sender_name ?? event.sender_id,
 			sender_id: event.sender_id,
 			content: event.text,
 			created_at: new Date().toISOString(),
@@ -564,6 +583,39 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		}
 	}, []);
 
+	const handleArtifactCreated = useCallback((data: unknown) => {
+		const event = data as ArtifactCreatedEvent;
+		setLiveStates((prev) => {
+			const existing = getOrCreate(prev, event.channel_id);
+			const artifactItemId = `artifact-${event.artifact_id}`;
+			const hasItem = existing.timeline.some((item) => item.id === artifactItemId);
+			const timeline = hasItem ? existing.timeline : [
+				...existing.timeline,
+				{
+					type: "artifact_notice" as const,
+					id: artifactItemId,
+					artifact_id: event.artifact_id,
+					kind: event.kind,
+					title: event.title,
+					created_at: new Date().toISOString(),
+				},
+			];
+			return {
+				...prev,
+				[event.channel_id]: {
+					...existing,
+					timeline,
+					lastArtifact: {
+						id: event.artifact_id,
+						kind: event.kind,
+						title: event.title,
+						createdAt: Date.now(),
+					},
+				},
+			};
+		});
+	}, []);
+
 	const loadOlderMessages = useCallback((channelId: string) => {
 		setLiveStates((prev) => {
 			const state = prev[channelId];
@@ -614,6 +666,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		branch_completed: handleBranchCompleted,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,
+		artifact_created: handleArtifactCreated,
 	};
 
 	return { liveStates, handlers, syncStatusSnapshot, loadOlderMessages };
