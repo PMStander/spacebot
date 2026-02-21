@@ -5,12 +5,23 @@ use crate::conversation::channels::ChannelStore;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+fn hosted_agent_limit() -> Option<usize> {
+    let deployment = std::env::var("SPACEBOT_DEPLOYMENT").ok()?;
+    if !deployment.eq_ignore_ascii_case("hosted") {
+        return None;
+    }
+
+    std::env::var("SPACEBOT_MAX_AGENTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
 
 #[derive(Serialize)]
 pub(super) struct AgentsResponse {
@@ -58,7 +69,9 @@ struct CronJobInfo {
     interval_secs: u64,
     delivery_target: String,
     enabled: bool,
+    run_once: bool,
     active_hours: Option<(u8, u8)>,
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -72,7 +85,6 @@ pub(super) struct InstanceOverviewResponse {
 #[derive(Serialize)]
 struct AgentSummary {
     id: String,
-    group: Option<String>,
     channel_count: usize,
     memory_total: i64,
     cron_job_count: usize,
@@ -135,6 +147,16 @@ pub(super) async fn create_agent(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    if let Some(limit) = hosted_agent_limit() {
+        let existing = state.agent_configs.load();
+        if existing.len() >= limit {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("agent limit reached for this instance: up to {limit} agent{}", if limit == 1 { "" } else { "s" })
+            })));
+        }
+    }
+
     let agent_id = request.agent_id.trim().to_string();
     if agent_id.is_empty() {
         return Ok(Json(serde_json::json!({
@@ -198,7 +220,6 @@ pub(super) async fn create_agent(
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
         default: false,
-        group: None,
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -216,6 +237,7 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
+    drop(defaults);
 
     for dir in [
         &agent_config.workspace,
@@ -344,7 +366,6 @@ pub(super) async fn create_agent(
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
         },
-        api_event_tx: Some(state.event_tx.clone()),
     };
 
     let event_rx = event_tx.subscribe();
@@ -383,68 +404,19 @@ pub(super) async fn create_agent(
         brave_search_key,
         runtime_config.workspace_dir.clone(),
         runtime_config.instance_dir.clone(),
-        db.sqlite.clone(),
-        agent_id.clone(),
-        state.event_tx.clone(),
     );
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
-
-    // Create a dedicated "Cortex Workers" internal channel for background workers
-    let worker_channel_id = format!("internal:cortex-workers-{}", agent_id);
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO channels \
-         (id, platform, display_name, platform_meta, last_activity_at) \
-         VALUES (?, 'internal', 'Cortex Workers', NULL, CURRENT_TIMESTAMP)",
-    )
-    .bind(&worker_channel_id)
-    .execute(&db.sqlite)
-    .await;
-
-    let worker_status_block = std::sync::Arc::new(tokio::sync::RwLock::new(
-        crate::agent::status::StatusBlock::new(),
-    ));
-    let worker_channel_state = crate::agent::channel::ChannelState {
-        channel_id: std::sync::Arc::from(worker_channel_id.as_str()),
-        history: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        active_branches: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        active_workers: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        worker_handles: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        worker_inputs: std::sync::Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
-        status_block: worker_status_block.clone(),
-        deps: deps.clone(),
-        conversation_logger: crate::conversation::history::ConversationLogger::new(
-            db.sqlite.clone(),
-        ),
-        process_run_logger: crate::conversation::history::ProcessRunLogger::new(db.sqlite.clone()),
-        channel_store: crate::conversation::ChannelStore::new(db.sqlite.clone()),
-        screenshot_dir: agent_config.screenshot_dir(),
-        logs_dir: agent_config.logs_dir(),
-    };
-    state
-        .register_channel_status(worker_channel_id.clone(), worker_status_block)
-        .await;
-    state
-        .register_channel_state(worker_channel_id.clone(), worker_channel_state.clone())
-        .await;
-
-    let cortex_session = crate::agent::cortex_chat::CortexChatSession::new_with_workers(
+    let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
         deps.clone(),
         cortex_tool_server,
         cortex_store,
-        worker_channel_state,
     );
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
-    let _ = crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
-    let _ = crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
+    let _bulletin_loop =
+        crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
+    let _association_loop =
+        crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
 
     let ingestion_config = **runtime_config.ingestion.load();
     if ingestion_config.enabled {
@@ -486,7 +458,6 @@ pub(super) async fn create_agent(
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
-            group: agent_config.group.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
@@ -505,10 +476,8 @@ pub(super) async fn create_agent(
             .cron_schedulers
             .store(std::sync::Arc::new(cron_schedulers));
 
-        let cortex_session_arc = std::sync::Arc::new(cortex_session);
-        cortex_session_arc.start_worker_watcher();
         let mut sessions = (**state.cortex_chat_sessions.load()).clone();
-        sessions.insert(agent_id.clone(), cortex_session_arc);
+        sessions.insert(agent_id.clone(), std::sync::Arc::new(cortex_session));
         state
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
@@ -682,7 +651,7 @@ pub(super) async fn agent_overview(
     let channel_count = channels.len();
 
     let cron_rows = sqlx::query(
-        "SELECT id, prompt, interval_secs, delivery_target, active_start_hour, active_end_hour, enabled FROM cron_jobs ORDER BY created_at ASC",
+        "SELECT id, prompt, interval_secs, delivery_target, active_start_hour, active_end_hour, enabled, run_once, timeout_secs FROM cron_jobs ORDER BY created_at ASC",
     )
     .fetch_all(pool)
     .await
@@ -699,10 +668,16 @@ pub(super) async fn agent_overview(
                 interval_secs: row.get::<i64, _>("interval_secs") as u64,
                 delivery_target: row.get("delivery_target"),
                 enabled: row.get::<i64, _>("enabled") != 0,
+                run_once: row.get::<i64, _>("run_once") != 0,
                 active_hours: match (active_start, active_end) {
                     (Some(s), Some(e)) => Some((s as u8, e as u8)),
                     _ => None,
                 },
+                timeout_secs: row
+                    .try_get::<Option<i64>, _>("timeout_secs")
+                    .ok()
+                    .flatten()
+                    .map(|t| t as u64),
             }
         })
         .collect();
@@ -891,7 +866,6 @@ pub(super) async fn instance_overview(
 
         agents.push(AgentSummary {
             id: agent_id,
-            group: agent_config.group.clone(),
             channel_count,
             memory_total,
             cron_job_count: cron_job_count as usize,
@@ -987,93 +961,4 @@ pub(super) async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
-}
-
-#[derive(Serialize)]
-pub(super) struct AvatarUploadResponse {
-    success: bool,
-}
-
-/// Serve the agent's avatar image.
-pub(super) async fn get_agent_avatar(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<AgentOverviewQuery>,
-) -> Result<Response, StatusCode> {
-    let pools = state.agent_pools.load();
-    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let profile = crate::agent::cortex::load_profile(pool, &query.agent_id)
-        .await
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let avatar_path = profile.avatar_path.ok_or(StatusCode::NOT_FOUND)?;
-
-    let data = tokio::fs::read(&avatar_path).await.map_err(|error| {
-        tracing::warn!(%error, path = %avatar_path, "failed to read avatar file");
-        StatusCode::NOT_FOUND
-    })?;
-
-    let mime = mime_guess::from_path(&avatar_path)
-        .first_or_octet_stream()
-        .to_string();
-
-    Ok(([(header::CONTENT_TYPE, mime)], data).into_response())
-}
-
-/// Upload an avatar image for an agent.
-pub(super) async fn upload_agent_avatar(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<AgentOverviewQuery>,
-    mut multipart: axum::extract::Multipart,
-) -> Result<Json<AvatarUploadResponse>, StatusCode> {
-    let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces
-        .get(&query.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    let pools = state.agent_pools.load();
-    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?
-        .ok_or(StatusCode::BAD_REQUEST)?;
-
-    let original_name = field
-        .file_name()
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "avatar.png".to_string());
-
-    let ext = std::path::Path::new(&original_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("png");
-
-    let data = field.bytes().await.map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    let avatar_path = workspace.join(format!("avatar.{ext}"));
-
-    tokio::fs::write(&avatar_path, &data)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write avatar file");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let path_str = avatar_path.to_string_lossy().to_string();
-
-    sqlx::query(
-        "UPDATE agent_profile SET avatar_path = ?, updated_at = datetime('now') WHERE agent_id = ?",
-    )
-    .bind(&path_str)
-    .bind(&query.agent_id)
-    .execute(pool)
-    .await
-    .map_err(|error| {
-        tracing::warn!(%error, "failed to update avatar_path in profile");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(AvatarUploadResponse { success: true }))
 }

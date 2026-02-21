@@ -148,6 +148,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         "minimax" => RoutingConfig::for_model("minimax/MiniMax-M1-80k".into()),
         "moonshot" => RoutingConfig::for_model("moonshot/kimi-k2.5".into()),
         "zai-coding-plan" => RoutingConfig::for_model("zai-coding-plan/glm-5".into()),
+        "gemini" => RoutingConfig::for_model("gemini/gemini-2.0-flash".into()),
         _ => RoutingConfig::default(),
     }
 }
@@ -171,6 +172,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "minimax" => "minimax/",
         "moonshot" => "moonshot/",
         "zai-coding-plan" => "zai-coding-plan/",
+        "gemini" => "gemini/",
         _ => "",
     }
 }
@@ -198,5 +200,3 @@ pub const RETRY_BASE_DELAY_MS: u64 = 500;
 /// momentary and shouldn't lock out a model for the full cooldown period.
 pub fn is_rate_limit_error(error_message: &str) -> bool {
     let lower = error_message.to_lowercase();
-    lower.contains("429") || lower.contains("rate limit")
-}

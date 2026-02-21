@@ -2,7 +2,7 @@
 
 pub mod agent;
 pub mod api;
-pub mod cli_worker;
+pub mod auth;
 pub mod config;
 pub mod conversation;
 pub mod cron;
@@ -30,13 +30,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Signal from the API to the main event loop to trigger provider setup or agent creation.
+/// Signal from the API to the main event loop to trigger provider setup.
 #[derive(Debug)]
 pub enum ProviderSetupEvent {
     /// New provider keys have been added. Reinitialize agents.
     ProvidersConfigured,
-    /// A new agent has been added to config.toml. Reinitialize to pick it up.
-    AgentCreated,
 }
 
 /// Agent identifier type.
@@ -183,8 +181,6 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
-    /// API event broadcaster for SSE notifications (canvas updates, etc.).
-    pub api_event_tx: Option<tokio::sync::broadcast::Sender<api::ApiEvent>>,
 }
 
 impl AgentDeps {

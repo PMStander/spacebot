@@ -24,7 +24,6 @@
 pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
-pub mod canvas;
 pub mod channel_recall;
 pub mod cron;
 pub mod exec;
@@ -49,7 +48,6 @@ pub use browser::{
     TabInfo,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
-pub use canvas::{CanvasListTool, CanvasRemoveTool, CanvasSetTool};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
@@ -66,7 +64,7 @@ pub use memory_save::{
     AssociationInput, MemorySaveArgs, MemorySaveError, MemorySaveOutput, MemorySaveTool,
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
-pub use reply::{ReplyArgs, ReplyError, ReplyOutput, ReplyTool};
+pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
 pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
@@ -131,6 +129,7 @@ pub async fn add_channel_tools(
     response_tx: mpsc::Sender<OutboundResponse>,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
+    replied_flag: RepliedFlag,
     cron_tool: Option<CronTool>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     handle
@@ -139,10 +138,7 @@ pub async fn add_channel_tools(
             conversation_id,
             state.conversation_logger.clone(),
             state.channel_id.clone(),
-            skip_flag.clone(),
-            state.deps.sqlite_pool.clone(),
-            state.deps.api_event_tx.clone(),
-            state.deps.agent_id.clone(),
+            replied_flag.clone(),
         ))
         .await?;
     handle.add_tool(BranchTool::new(state.clone())).await?;
@@ -227,34 +223,14 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
-    sqlite_pool: sqlx::SqlitePool,
-    api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace))
         .tool(SetStatusTool::new(
-            agent_id.clone(),
-            worker_id,
-            channel_id,
-            event_tx,
+            agent_id, worker_id, channel_id, event_tx,
         ));
-
-    if let Some(api_tx) = api_event_tx {
-        server = server
-            .tool(CanvasSetTool::new(
-                sqlite_pool.clone(),
-                agent_id.to_string(),
-                api_tx.clone(),
-            ))
-            .tool(CanvasRemoveTool::new(
-                sqlite_pool.clone(),
-                agent_id.to_string(),
-                api_tx,
-            ))
-            .tool(CanvasListTool::new(sqlite_pool));
-    }
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
@@ -291,9 +267,6 @@ pub fn create_cortex_chat_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
-    sqlite_pool: sqlx::SqlitePool,
-    agent_id: String,
-    api_event_tx: broadcast::Sender<crate::api::ApiEvent>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
@@ -302,18 +275,7 @@ pub fn create_cortex_chat_tool_server(
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(instance_dir, workspace))
-        .tool(CanvasSetTool::new(
-            sqlite_pool.clone(),
-            agent_id.clone(),
-            api_event_tx.clone(),
-        ))
-        .tool(CanvasRemoveTool::new(
-            sqlite_pool.clone(),
-            agent_id,
-            api_event_tx,
-        ))
-        .tool(CanvasListTool::new(sqlite_pool));
+        .tool(ExecTool::new(instance_dir, workspace));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));

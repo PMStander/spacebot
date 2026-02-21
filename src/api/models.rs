@@ -1,7 +1,7 @@
 use super::state::ApiState;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 #[derive(Serialize, Clone)]
 pub(super) struct ModelInfo {
-    /// Full routing string (e.g. "openrouter/anthropic/claude-sonnet-4-20250514")
+    /// Full routing string (e.g. "openrouter/anthropic/claude-sonnet-4")
     id: String,
     /// Human-readable name
     name: String,
@@ -26,6 +26,11 @@ pub(super) struct ModelInfo {
 #[derive(Serialize)]
 pub(super) struct ModelsResponse {
     models: Vec<ModelInfo>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ModelsQuery {
+    provider: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -324,9 +329,6 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("zhipu_key", "ZHIPU_API_KEY") {
         providers.push("zhipu");
     }
-    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") {
-        providers.push("zhipu-sub");
-    }
     if has_key("groq_key", "GROQ_API_KEY") {
         providers.push("groq");
     }
@@ -363,19 +365,35 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
 
 pub(super) async fn get_models(
     State(state): State<Arc<ApiState>>,
+    Query(query): Query<ModelsQuery>,
 ) -> Result<Json<ModelsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let configured = configured_providers(&config_path).await;
+    let requested_provider = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty());
 
     let catalog = ensure_models_cache().await;
 
     let mut models: Vec<ModelInfo> = catalog
         .into_iter()
-        .filter(|m| configured.contains(&m.provider.as_str()))
+        .filter(|model| {
+            if let Some(provider) = requested_provider {
+                model.provider == provider
+            } else {
+                configured.contains(&model.provider.as_str())
+            }
+        })
         .collect();
 
     for model in extra_models() {
-        if configured.contains(&model.provider.as_str()) {
+        if let Some(provider) = requested_provider {
+            if model.provider == provider {
+                models.push(model);
+            }
+        } else if configured.contains(&model.provider.as_str()) {
             models.push(model);
         }
     }
@@ -391,5 +409,5 @@ pub(super) async fn refresh_models(
         *cache = (Vec::new(), std::time::Instant::now() - MODELS_CACHE_TTL);
     }
 
-    get_models(State(state)).await
+    get_models(State(state), Query(ModelsQuery { provider: None })).await
 }

@@ -78,7 +78,6 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
-        api_event_tx: None,
     };
 
     Ok((deps, config))
@@ -129,15 +128,8 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
     let opencode_enabled = rc.opencode.load().enabled;
-    let cli_config = rc.cli_workers.load();
-    let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
-    let cli_backends: Vec<(String, String)> = cli_config
-        .backends
-        .iter()
-        .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
-        .collect();
     let worker_capabilities = prompt_engine
-        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
+        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
@@ -199,12 +191,14 @@ async fn dump_channel_context() {
 
     let tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
+    let replied_flag = spacebot::tools::new_replied_flag();
     spacebot::tools::add_channel_tools(
         &tool_server,
         state,
         response_tx,
         "test-conversation",
         skip_flag,
+        replied_flag,
         None,
     )
     .await
@@ -321,8 +315,6 @@ async fn dump_worker_context() {
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
-        deps.sqlite_pool.clone(),
-        deps.api_event_tx.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -407,12 +399,14 @@ async fn dump_all_contexts() {
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
+    let replied_flag = spacebot::tools::new_replied_flag();
     spacebot::tools::add_channel_tools(
         &channel_tool_server,
         state,
         response_tx,
         "test",
         skip_flag,
+        replied_flag,
         None,
     )
     .await
@@ -468,8 +462,6 @@ async fn dump_all_contexts() {
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
-        deps.sqlite_pool.clone(),
-        deps.api_event_tx.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

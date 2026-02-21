@@ -1587,7 +1587,14 @@ impl Config {
                 || key.contains("PROVIDER") && key.contains("API_KEY")
         });
 
-        !has_provider_env_vars
+        // Also check for specific legacy env vars that can bootstrap
+        let has_legacy_bootstrap_vars = std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+            || std::env::var("OPENAI_API_KEY").is_ok()
+            || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+
+        !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
 
     /// Load configuration from the default config file, falling back to env vars.

@@ -1,15 +1,36 @@
 //! Reply tool for sending messages to users (channel only).
 
 use crate::conversation::ConversationLogger;
-use crate::tools::SkipFlag;
-use crate::{AgentId, ChannelId, OutboundResponse};
+
+use crate::{ChannelId, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
+use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use tokio::sync::{broadcast, mpsc};
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::mpsc;
+
+static BROKEN_DISCORD_MENTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"<{2,}@(!?)>\s*(\d{15,22})>").expect("hardcoded broken mention regex")
+});
+
+static DISCORD_ID_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d{15,22}").expect("hardcoded discord id regex"));
+
+/// Shared flag between the ReplyTool and the channel event loop.
+///
+/// When the tool is called, this is set to `true`. The channel checks it
+/// after the LLM turn to decide whether to suppress fallback text output.
+pub type RepliedFlag = Arc<AtomicBool>;
+
+/// Create a new replied flag (defaults to false).
+pub fn new_replied_flag() -> RepliedFlag {
+    Arc::new(AtomicBool::new(false))
+}
 
 /// Tool for replying to users.
 ///
@@ -23,10 +44,7 @@ pub struct ReplyTool {
     conversation_id: String,
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
-    skip_flag: SkipFlag,
-    sqlite_pool: sqlx::SqlitePool,
-    api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
-    agent_id: AgentId,
+    replied_flag: RepliedFlag,
 }
 
 impl ReplyTool {
@@ -36,20 +54,14 @@ impl ReplyTool {
         conversation_id: impl Into<String>,
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
-        skip_flag: SkipFlag,
-        sqlite_pool: sqlx::SqlitePool,
-        api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
-        agent_id: AgentId,
+        replied_flag: RepliedFlag,
     ) -> Self {
         Self {
             response_tx,
             conversation_id: conversation_id.into(),
             conversation_logger,
             channel_id,
-            skip_flag,
-            sqlite_pool,
-            api_event_tx,
-            agent_id,
+            replied_flag,
         }
     }
 }
@@ -102,12 +114,14 @@ async fn convert_mentions(
     conversation_logger: &ConversationLogger,
     source: &str,
 ) -> String {
+    let mut result = normalize_discord_mention_tokens(content, source);
+
     // Load recent conversation to extract user mappings
     let messages = match conversation_logger.load_recent(channel_id, 50).await {
         Ok(msgs) => msgs,
         Err(e) => {
             tracing::warn!(error = %e, "failed to load conversation for mention conversion");
-            return content.to_string();
+            return result;
         }
     };
 
@@ -117,12 +131,11 @@ async fn convert_mentions(
         if let (Some(name), Some(id), Some(meta_str)) =
             (&msg.sender_name, &msg.sender_id, &msg.metadata)
         {
-            // Parse metadata JSON to get clean display name (without mention syntax)
+            // Parse metadata JSON to get clean display name
             if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str) {
                 if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str())
                 {
-                    // For Slack (from PR #43), sender_display_name includes mention: "Name (<@ID>)"
-                    // Extract just the name part
+                    // Older rows may include mention syntax "Name (<@ID>)"; strip it.
                     let clean_name = display_name.split(" (<@").next().unwrap_or(display_name);
                     name_to_id.insert(clean_name.to_string(), id.clone());
                 }
@@ -133,151 +146,116 @@ async fn convert_mentions(
     }
 
     if name_to_id.is_empty() {
-        return content.to_string();
+        return result;
     }
 
     // Convert @Name patterns to platform-specific mentions
-    let mut result = content.to_string();
-
     // Sort by name length (longest first) to avoid partial replacements
     // e.g., "Alice Smith" before "Alice"
     let mut names: Vec<_> = name_to_id.keys().cloned().collect();
     names.sort_by(|a, b| b.len().cmp(&a.len()));
 
     for name in names {
-        if let Some(user_id) = name_to_id.get(&name) {
+        let name = name.trim();
+        if name.is_empty() || name.contains('<') || name.contains('>') || name.contains('@') {
+            continue;
+        }
+
+        if let Some(user_id) = name_to_id.get(name) {
             let mention_pattern = format!("@{}", name);
             let replacement = match source {
-                "discord" | "slack" => format!("<@{}>", user_id),
+                "discord" => {
+                    let Some(discord_id) = sanitize_discord_user_id(user_id) else {
+                        continue;
+                    };
+                    format!("<@{}>", discord_id)
+                }
+                "slack" => format!("<@{}>", user_id),
                 "telegram" => format!("@{}", name), // Telegram uses @username (already correct)
-                _ => mention_pattern.clone(),       // Unknown platform, leave as-is
+                _ => mention_pattern.clone(),          // Unknown platform, leave as-is
             };
 
-            // Only replace if not already in correct format
-            // Avoid double-converting "<@123>" patterns
-            if !result.contains(&format!("<@{}>", user_id)) {
-                result = result.replace(&mention_pattern, &replacement);
-            }
+            result = result.replace(&mention_pattern, &replacement);
         }
     }
 
     result
 }
 
-#[derive(Debug, Clone)]
-struct ParsedArtifact {
-    id: String,
-    kind: String,
-    title: String,
-    content: String,
-}
-
-/// Parse `<artifact kind="..." title="...">...</artifact>` blocks from text.
-fn parse_artifact_tags(text: &str) -> Vec<ParsedArtifact> {
-    let mut results = Vec::new();
-    let mut pos = 0;
-
-    while let Some(rel_start) = text[pos..].find("<artifact") {
-        let start = pos + rel_start;
-
-        let Some(rel_tag_end) = text[start..].find('>') else {
-            break;
-        };
-        let tag_end = start + rel_tag_end + 1;
-        let tag = &text[start..tag_end];
-
-        let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
-        let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
-        let id = extract_attr(tag, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let Some(rel_close) = text[tag_end..].find("</artifact>") else {
-            break;
-        };
-        let content_end = tag_end + rel_close;
-        let content = text[tag_end..content_end].trim().to_string();
-
-        results.push(ParsedArtifact {
-            id,
-            kind,
-            title,
-            content,
-        });
-        pos = content_end + "</artifact>".len();
+fn sanitize_discord_user_id(user_id: &str) -> Option<String> {
+    let trimmed = user_id.trim();
+    if trimmed.len() >= 15
+        && trimmed.len() <= 22
+        && trimmed.chars().all(|c| c.is_ascii_digit())
+    {
+        return Some(trimmed.to_string());
     }
 
-    results
+    DISCORD_ID_REGEX
+        .find(trimmed)
+        .map(|m| m.as_str().to_string())
 }
 
-/// Remove all `<artifact>...</artifact>` blocks and return remaining text.
-fn strip_artifact_tags(text: &str) -> String {
-    let mut result = text.to_string();
+pub(crate) fn normalize_discord_mention_tokens(content: &str, source: &str) -> String {
+    let _ = source;
 
-    loop {
-        let Some(start) = result.find("<artifact") else {
-            break;
-        };
-        let Some(rel_close) = result[start..].find("</artifact>") else {
-            break;
-        };
-        let end = start + rel_close + "</artifact>".len();
-        result.replace_range(start..end, "");
+    let mut normalized = content
+        .replace("&lt;@!", "<@!")
+        .replace("&lt;@", "<@")
+        .replace("&gt;", ">")
+        .replace("\\<@!", "<@!")
+        .replace("\\<@", "<@")
+        .replace("<<@!>", "<@!")
+        .replace("<<@>", "<@");
+
+    while normalized.contains("<<@") {
+        normalized = normalized.replace("<<@", "<@");
     }
 
-    result.trim().to_string()
+    normalized = normalized
+        .replace("<@!>", "<@!")
+        .replace("<@>", "<@");
+
+    normalized = BROKEN_DISCORD_MENTION_REGEX
+        .replace_all(&normalized, "<@$1$2>")
+        .into_owned();
+
+    normalized
 }
 
-fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    let start = tag.find(&pattern)? + pattern.len();
-    let end = tag[start..].find('"')?;
-    Some(tag[start..start + end].to_string())
-}
+#[cfg(test)]
+mod tests {
+    use super::{normalize_discord_mention_tokens, sanitize_discord_user_id};
 
-async fn persist_channel_artifact(
-    sqlite_pool: &sqlx::SqlitePool,
-    channel_id: &ChannelId,
-    artifact: &ParsedArtifact,
-) -> std::result::Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO artifacts (id, channel_id, kind, title, content, metadata, version, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
-         ON CONFLICT(id) DO UPDATE SET \
-            kind = excluded.kind, \
-            title = excluded.title, \
-            content = excluded.content, \
-            metadata = excluded.metadata, \
-            version = artifacts.version + 1, \
-            updated_at = CURRENT_TIMESTAMP",
-    )
-    .bind(&artifact.id)
-    .bind(channel_id.as_ref())
-    .bind(&artifact.kind)
-    .bind(&artifact.title)
-    .bind(&artifact.content)
-    .bind(Option::<String>::None)
-    .execute(sqlite_pool)
-    .await?;
+    #[test]
+    fn normalizes_broken_discord_mentions() {
+        let input = "hello <<@>123> and <<@!>456>";
+        let output = normalize_discord_mention_tokens(input, "discord");
 
-    Ok(())
-}
+        assert_eq!(output, "hello <@123> and <@!456>");
+    }
 
-fn emit_artifact_created_event(
-    api_event_tx: &Option<broadcast::Sender<crate::api::ApiEvent>>,
-    agent_id: &AgentId,
-    channel_id: &ChannelId,
-    artifact: &ParsedArtifact,
-) {
-    let Some(api_event_tx) = api_event_tx else {
-        return;
-    };
+    #[test]
+    fn leaves_plain_text_unchanged() {
+        let input = "hello team";
+        let output = normalize_discord_mention_tokens(input, "slack");
 
-    let _ = api_event_tx.send(crate::api::ApiEvent::ArtifactCreated {
-        agent_id: agent_id.to_string(),
-        channel_id: channel_id.to_string(),
-        artifact_id: artifact.id.clone(),
-        kind: artifact.kind.clone(),
-        title: artifact.title.clone(),
-    });
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn normalizes_repeated_prefix_and_html_encoded_tokens() {
+        let input = "<<<@>190291964875374603> and &lt;@!234152400653385729&gt;";
+        let output = normalize_discord_mention_tokens(input, "discord");
+
+        assert_eq!(output, "<@190291964875374603> and <@!234152400653385729>");
+    }
+
+    #[test]
+    fn sanitizes_discord_ids_with_prefix_noise() {
+        let parsed = sanitize_discord_user_id(">234152400653385729").expect("should parse id");
+        assert_eq!(parsed, "234152400653385729");
+    }
 }
 
 impl Tool for ReplyTool {
@@ -395,109 +373,59 @@ impl Tool for ReplyTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let ReplyArgs {
-            content,
-            thread_name,
-            cards,
-            interactive_elements,
-            poll,
-        } = args;
-
         tracing::info!(
             conversation_id = %self.conversation_id,
-            content_len = content.len(),
-            thread_name = thread_name.as_deref(),
+            content_len = args.content.len(),
+            thread_name = args.thread_name.as_deref(),
             "reply tool called"
         );
-
-        let artifacts = parse_artifact_tags(&content);
-        if !artifacts.is_empty() {
-            for artifact in &artifacts {
-                if let Err(error) =
-                    persist_channel_artifact(&self.sqlite_pool, &self.channel_id, artifact).await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.channel_id,
-                        artifact_id = %artifact.id,
-                        "failed to persist artifact from reply tool",
-                    );
-                } else {
-                    emit_artifact_created_event(
-                        &self.api_event_tx,
-                        &self.agent_id,
-                        &self.channel_id,
-                        artifact,
-                    );
-                }
-            }
-        }
 
         // Extract source from conversation_id (format: "platform:id")
         let source = self.conversation_id.split(':').next().unwrap_or("unknown");
 
-        let stripped_content = strip_artifact_tags(&content);
-
         // Auto-convert @mentions to platform-specific syntax
-        let mut converted_content = convert_mentions(
-            &stripped_content,
+        let converted_content = convert_mentions(
+            &args.content,
             &self.channel_id,
             &self.conversation_logger,
             source,
         )
         .await;
 
-        let has_rich_payload = cards.is_some() || interactive_elements.is_some() || poll.is_some();
-        if converted_content.trim().is_empty() && !artifacts.is_empty() {
-            converted_content = if artifacts.len() == 1 {
-                format!("Artifact ready: {}", artifacts[0].title)
+        self.conversation_logger
+            .log_bot_message(&self.channel_id, &converted_content);
+
+        let response = if let Some(ref name) = args.thread_name {
+            // Cap thread names at 100 characters (Discord limit)
+            let thread_name = if name.len() > 100 {
+                name[..name.floor_char_boundary(100)].to_string()
             } else {
-                format!("{} artifacts ready.", artifacts.len())
+                name.clone()
             };
-        }
+            OutboundResponse::ThreadReply {
+                thread_name,
+                text: converted_content.clone(),
+            }
+        } else if args.cards.is_some() || args.interactive_elements.is_some() || args.poll.is_some()
+        {
+            OutboundResponse::RichMessage {
+                text: converted_content.clone(),
+                blocks: vec![], // No block generation for now; Slack adapters will fall back to text
+                cards: args.cards.unwrap_or_default(),
+                interactive_elements: args.interactive_elements.unwrap_or_default(),
+                poll: args.poll,
+            }
+        } else {
+            OutboundResponse::Text(converted_content.clone())
+        };
 
-        if !converted_content.trim().is_empty() {
-            self.conversation_logger
-                .log_bot_message(&self.channel_id, &converted_content);
-        }
+        self.response_tx
+            .send(response)
+            .await
+            .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 
-        let should_send_response =
-            thread_name.is_some() || has_rich_payload || !converted_content.trim().is_empty();
-        if should_send_response {
-            let response = if let Some(ref name) = thread_name {
-                // Cap thread names at 100 characters (Discord limit)
-                let thread_name = if name.len() > 100 {
-                    name[..name.floor_char_boundary(100)].to_string()
-                } else {
-                    name.clone()
-                };
-                OutboundResponse::ThreadReply {
-                    thread_name,
-                    text: converted_content.clone(),
-                }
-            } else if has_rich_payload {
-                OutboundResponse::RichMessage {
-                    text: converted_content.clone(),
-                    blocks: vec![], // No block generation for now; Slack adapters will fall back to text
-                    cards: cards.unwrap_or_default(),
-                    interactive_elements: interactive_elements.unwrap_or_default(),
-                    poll,
-                }
-            } else {
-                OutboundResponse::Text(converted_content.clone())
-            };
-
-            self.response_tx
-                .send(response)
-                .await
-                .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
-        }
-
-        /*
-         * Mark the turn as handled so handle_agent_result skips the fallback send.
-         * This includes artifact-only replies where no text response is needed.
-         */
-        self.skip_flag.store(true, Ordering::Relaxed);
+        // Mark the turn as handled so handle_agent_result skips the fallback send.
+        self.replied_flag.store(true, Ordering::Relaxed);
 
         tracing::debug!(conversation_id = %self.conversation_id, "reply sent to outbound channel");
 

@@ -2,8 +2,8 @@
 
 use super::state::ApiState;
 use super::{
-    agents, artifacts, bindings, canvas, channels, config, cortex, cron, ingest, local_file,
-    memories, messaging, models, providers, settings, skills, system, webchat, workers,
+    agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models,
+    providers, settings, skills, system, webchat,
 };
 
 use axum::Router;
@@ -40,6 +40,9 @@ pub async fn start_http_server(
         .route("/health", get(system::health))
         .route("/idle", get(system::idle))
         .route("/status", get(system::status))
+        .route("/system/storage", get(system::storage_status))
+        .route("/system/backup/export", get(system::backup_export))
+        .route("/system/backup/restore", post(system::backup_restore))
         .route("/overview", get(agents::instance_overview))
         .route("/events", get(system::events_sse))
         .route(
@@ -49,13 +52,7 @@ pub async fn start_http_server(
                 .delete(agents::delete_agent),
         )
         .route("/agents/overview", get(agents::agent_overview))
-        .route(
-            "/channels",
-            get(channels::list_channels)
-                .post(channels::create_internal_channel)
-                .patch(channels::rename_channel)
-                .delete(channels::delete_channel),
-        )
+        .route("/channels", get(channels::list_channels))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
@@ -68,16 +65,7 @@ pub async fn start_http_server(
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
-        .route("/cortex-chat/upload", post(cortex::upload_chat_files))
-        .route(
-            "/cortex-chat/worker",
-            post(cortex::cortex_chat_spawn_worker),
-        )
         .route("/agents/profile", get(agents::get_agent_profile))
-        .route(
-            "/agents/avatar",
-            get(agents::get_agent_avatar).post(agents::upload_agent_avatar),
-        )
         .route(
             "/agents/identity",
             get(agents::get_identity).put(agents::update_identity),
@@ -95,7 +83,6 @@ pub async fn start_http_server(
         .route("/agents/cron/executions", get(cron::cron_executions))
         .route("/agents/cron/trigger", post(cron::trigger_cron))
         .route("/agents/cron/toggle", put(cron::toggle_cron))
-        .route("/agents/workers", get(workers::list_worker_runs))
         .route("/channels/cancel", post(channels::cancel_process))
         .route(
             "/agents/ingest/files",
@@ -111,6 +98,7 @@ pub async fn start_http_server(
             "/providers",
             get(providers::get_providers).put(providers::update_provider),
         )
+        .route("/providers/test", post(providers::test_provider_model))
         .route("/providers/{provider}", delete(providers::delete_provider))
         .route("/models", get(models::get_models))
         .route("/models/refresh", post(models::refresh_models))
@@ -141,20 +129,7 @@ pub async fn start_http_server(
         )
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
-        .route("/webchat/upload", post(webchat::webchat_upload))
-        .route("/webchat/history", get(webchat::webchat_history))
-        .route(
-            "/agents/artifacts",
-            get(artifacts::list_artifacts).post(artifacts::create_artifact),
-        )
-        .route(
-            "/agents/artifacts/{id}",
-            get(artifacts::get_artifact)
-                .put(artifacts::update_artifact)
-                .delete(artifacts::delete_artifact),
-        )
-        .route("/local-file", get(local_file::serve_local_file))
-        .route("/canvas/panels", get(canvas::list_canvas_panels));
+        .route("/webchat/history", get(webchat::webchat_history));
 
     let app = Router::new()
         .nest("/api", api_routes)

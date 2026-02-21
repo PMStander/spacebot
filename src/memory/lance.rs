@@ -85,7 +85,7 @@ impl EmbeddingTable {
             .into());
         }
 
-        use arrow_array::{RecordBatch, StringArray};
+        use arrow_array::{FixedSizeListArray, RecordBatch, StringArray};
 
         let schema = Self::schema();
 
