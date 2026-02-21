@@ -551,6 +551,7 @@ export interface RoutingSection {
 	worker: string;
 	compactor: string;
 	cortex: string;
+	voice: string;
 	rate_limit_cooldown_secs: number;
 	channel_thinking_effort: string;
 	branch_thinking_effort: string;
@@ -626,6 +627,7 @@ export interface RoutingUpdate {
 	worker?: string;
 	compactor?: string;
 	cortex?: string;
+	voice?: string;
 	rate_limit_cooldown_secs?: number;
 	channel_thinking_effort?: string;
 	branch_thinking_effort?: string;
@@ -792,6 +794,7 @@ export interface ModelInfo {
 	context_window: number | null;
 	tool_call: boolean;
 	reasoning: boolean;
+	input_audio: boolean;
 }
 
 export interface ModelsResponse {
@@ -1349,8 +1352,11 @@ export const api = {
 	},
 
 	// Model listing
-	models: (provider?: string) => {
-		const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+	models: (provider?: string, capability?: string) => {
+		const params = new URLSearchParams();
+		if (provider) params.set("provider", provider);
+		if (capability) params.set("capability", capability);
+		const query = params.toString() ? `?${params.toString()}` : "";
 		return fetchJson<ModelsResponse>(`/models${query}`);
 	},
 	refreshModels: async () => {

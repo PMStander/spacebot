@@ -1261,6 +1261,7 @@ struct TomlRoutingConfig {
     worker: Option<String>,
     compactor: Option<String>,
     cortex: Option<String>,
+    voice: Option<String>,
     rate_limit_cooldown_secs: Option<u64>,
     #[serde(default)]
     task_overrides: HashMap<String, String>,
@@ -1527,6 +1528,7 @@ fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> Rou
         worker: t.worker.unwrap_or_else(|| base.worker.clone()),
         compactor: t.compactor.unwrap_or_else(|| base.compactor.clone()),
         cortex: t.cortex.unwrap_or_else(|| base.cortex.clone()),
+        voice: t.voice.unwrap_or_else(|| base.voice.clone()),
         task_overrides,
         fallbacks,
         rate_limit_cooldown_secs: t
@@ -1760,6 +1762,9 @@ impl Config {
         }
         if let Ok(worker_model) = std::env::var("SPACEBOT_WORKER_MODEL") {
             routing.worker = worker_model;
+        }
+        if let Ok(voice_model) = std::env::var("SPACEBOT_VOICE_MODEL") {
+            routing.voice = voice_model;
         }
 
         let agents = vec![AgentConfig {

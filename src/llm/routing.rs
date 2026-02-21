@@ -14,6 +14,7 @@ pub struct RoutingConfig {
     pub worker: String,
     pub compactor: String,
     pub cortex: String,
+    pub voice: String,
 
     /// Task-type overrides (e.g. "coding" → "anthropic/claude-sonnet-4").
     /// Applied to workers and branches when a task_type is specified at spawn.
@@ -42,6 +43,7 @@ impl RoutingConfig {
             worker: model.clone(),
             compactor: model.clone(),
             cortex: model,
+            voice: String::new(),
             task_overrides: HashMap::new(),
             fallbacks: HashMap::new(),
             rate_limit_cooldown_secs: 60,
@@ -128,7 +130,167 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
     match provider {
         "anthropic" => RoutingConfig::for_model("anthropic/claude-sonnet-4-20250514".into()),
         "openrouter" => {
-            RoutingConfig::for_model("openrouter/anthropic/claude-sonnet-4-20250514".into())
+            let channel: String = "openrouter/anthropic/claude-sonnet-4-20250514".into();
+            let worker: String = "openrouter/anthropic/claude-haiku-4.5-20250514".into();
+            RoutingConfig {
+                channel: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
+                branch: "openrouter/anthropic/claude-sonnet-4-20250514".into(),
+                worker: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                compactor: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                cortex: "openrouter/anthropic/claude-haiku-4.5-20250514".into(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "openai" => {
+            let channel: String = "openai/gpt-4.1".into();
+            let worker: String = "openai/gpt-4.1-mini".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "zhipu" => {
+            let channel: String = "zhipu/glm-4-plus".into();
+            let worker: String = "zhipu/glm-4-flash".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "groq" => {
+            let channel: String = "groq/llama-3.3-70b-versatile".into();
+            let worker: String = "groq/llama-3.3-70b-specdec".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "together" => {
+            let channel: String = "together/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo".into();
+            let worker: String = "together/meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "fireworks" => {
+            let channel: String =
+                "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct".into();
+            let worker: String =
+                "fireworks/accounts/fireworks/models/llama-v3p1-8b-instruct".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "deepseek" => {
+            let channel: String = "deepseek/deepseek-chat".into();
+            let worker: String = "deepseek/deepseek-chat".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "xai" => {
+            let channel: String = "xai/grok-2-latest".into();
+            let worker: String = "xai/grok-2-latest".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "mistral" => {
+            let channel: String = "mistral/mistral-large-latest".into();
+            let worker: String = "mistral/mistral-small-latest".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
+        "opencode-zen" => {
+            let channel: String = "opencode-zen/kimi-k2.5".into();
+            let worker: String = "opencode-zen/kimi-k2.5".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+>>>>>>> c7b10e8 (feat(api): add voice model support and audio transcription capabilities)
         }
         "openai" => RoutingConfig::for_model("openai/gpt-4.1".into()),
         "zhipu" => RoutingConfig::for_model("zhipu/glm-4-plus".into()),
