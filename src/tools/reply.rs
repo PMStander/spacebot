@@ -1,15 +1,15 @@
 //! Reply tool for sending messages to users (channel only).
 
 use crate::conversation::ConversationLogger;
-use crate::{ChannelId, OutboundResponse};
 use crate::tools::SkipFlag;
+use crate::{AgentId, ChannelId, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 /// Tool for replying to users.
 ///
@@ -24,6 +24,9 @@ pub struct ReplyTool {
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
     skip_flag: SkipFlag,
+    sqlite_pool: sqlx::SqlitePool,
+    api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
+    agent_id: AgentId,
 }
 
 impl ReplyTool {
@@ -34,6 +37,9 @@ impl ReplyTool {
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
         skip_flag: SkipFlag,
+        sqlite_pool: sqlx::SqlitePool,
+        api_event_tx: Option<broadcast::Sender<crate::api::ApiEvent>>,
+        agent_id: AgentId,
     ) -> Self {
         Self {
             response_tx,
@@ -41,6 +47,9 @@ impl ReplyTool {
             conversation_logger,
             channel_id,
             skip_flag,
+            sqlite_pool,
+            api_event_tx,
+            agent_id,
         }
     }
 }
@@ -105,18 +114,16 @@ async fn convert_mentions(
     // Build display_name → user_id mapping from metadata
     let mut name_to_id: HashMap<String, String> = HashMap::new();
     for msg in messages {
-        if let (Some(name), Some(id), Some(meta_str)) = 
-            (&msg.sender_name, &msg.sender_id, &msg.metadata) 
+        if let (Some(name), Some(id), Some(meta_str)) =
+            (&msg.sender_name, &msg.sender_id, &msg.metadata)
         {
             // Parse metadata JSON to get clean display name (without mention syntax)
             if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str) {
-                if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str()) {
+                if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str())
+                {
                     // For Slack (from PR #43), sender_display_name includes mention: "Name (<@ID>)"
                     // Extract just the name part
-                    let clean_name = display_name
-                        .split(" (<@")
-                        .next()
-                        .unwrap_or(display_name);
+                    let clean_name = display_name.split(" (<@").next().unwrap_or(display_name);
                     name_to_id.insert(clean_name.to_string(), id.clone());
                 }
             }
@@ -131,7 +138,7 @@ async fn convert_mentions(
 
     // Convert @Name patterns to platform-specific mentions
     let mut result = content.to_string();
-    
+
     // Sort by name length (longest first) to avoid partial replacements
     // e.g., "Alice Smith" before "Alice"
     let mut names: Vec<_> = name_to_id.keys().cloned().collect();
@@ -143,7 +150,7 @@ async fn convert_mentions(
             let replacement = match source {
                 "discord" | "slack" => format!("<@{}>", user_id),
                 "telegram" => format!("@{}", name), // Telegram uses @username (already correct)
-                _ => mention_pattern.clone(), // Unknown platform, leave as-is
+                _ => mention_pattern.clone(),       // Unknown platform, leave as-is
             };
 
             // Only replace if not already in correct format
@@ -155,6 +162,122 @@ async fn convert_mentions(
     }
 
     result
+}
+
+#[derive(Debug, Clone)]
+struct ParsedArtifact {
+    id: String,
+    kind: String,
+    title: String,
+    content: String,
+}
+
+/// Parse `<artifact kind="..." title="...">...</artifact>` blocks from text.
+fn parse_artifact_tags(text: &str) -> Vec<ParsedArtifact> {
+    let mut results = Vec::new();
+    let mut pos = 0;
+
+    while let Some(rel_start) = text[pos..].find("<artifact") {
+        let start = pos + rel_start;
+
+        let Some(rel_tag_end) = text[start..].find('>') else {
+            break;
+        };
+        let tag_end = start + rel_tag_end + 1;
+        let tag = &text[start..tag_end];
+
+        let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
+        let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
+        let id = extract_attr(tag, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let Some(rel_close) = text[tag_end..].find("</artifact>") else {
+            break;
+        };
+        let content_end = tag_end + rel_close;
+        let content = text[tag_end..content_end].trim().to_string();
+
+        results.push(ParsedArtifact {
+            id,
+            kind,
+            title,
+            content,
+        });
+        pos = content_end + "</artifact>".len();
+    }
+
+    results
+}
+
+/// Remove all `<artifact>...</artifact>` blocks and return remaining text.
+fn strip_artifact_tags(text: &str) -> String {
+    let mut result = text.to_string();
+
+    loop {
+        let Some(start) = result.find("<artifact") else {
+            break;
+        };
+        let Some(rel_close) = result[start..].find("</artifact>") else {
+            break;
+        };
+        let end = start + rel_close + "</artifact>".len();
+        result.replace_range(start..end, "");
+    }
+
+    result.trim().to_string()
+}
+
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    let start = tag.find(&pattern)? + pattern.len();
+    let end = tag[start..].find('"')?;
+    Some(tag[start..start + end].to_string())
+}
+
+async fn persist_channel_artifact(
+    sqlite_pool: &sqlx::SqlitePool,
+    channel_id: &ChannelId,
+    artifact: &ParsedArtifact,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO artifacts (id, channel_id, kind, title, content, metadata, version, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
+         ON CONFLICT(id) DO UPDATE SET \
+            kind = excluded.kind, \
+            title = excluded.title, \
+            content = excluded.content, \
+            metadata = excluded.metadata, \
+            version = artifacts.version + 1, \
+            updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(&artifact.id)
+    .bind(channel_id.as_ref())
+    .bind(&artifact.kind)
+    .bind(&artifact.title)
+    .bind(&artifact.content)
+    .bind(Option::<String>::None)
+    .execute(sqlite_pool)
+    .await?;
+
+    Ok(())
+}
+
+fn emit_artifact_created_event(
+    api_event_tx: &Option<broadcast::Sender<crate::api::ApiEvent>>,
+    agent_id: &AgentId,
+    channel_id: &ChannelId,
+    artifact: &ParsedArtifact,
+) {
+    let Some(api_event_tx) = api_event_tx else {
+        return;
+    };
+
+    let _ = api_event_tx.send(crate::api::ApiEvent::ArtifactCreated {
+        agent_id: agent_id.to_string(),
+        channel_id: channel_id.to_string(),
+        artifact_id: artifact.id.clone(),
+        kind: artifact.kind.clone(),
+        title: artifact.title.clone(),
+    });
 }
 
 impl Tool for ReplyTool {
@@ -272,58 +395,108 @@ impl Tool for ReplyTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let ReplyArgs {
+            content,
+            thread_name,
+            cards,
+            interactive_elements,
+            poll,
+        } = args;
+
         tracing::info!(
             conversation_id = %self.conversation_id,
-            content_len = args.content.len(),
-            thread_name = args.thread_name.as_deref(),
+            content_len = content.len(),
+            thread_name = thread_name.as_deref(),
             "reply tool called"
         );
 
+        let artifacts = parse_artifact_tags(&content);
+        if !artifacts.is_empty() {
+            for artifact in &artifacts {
+                if let Err(error) =
+                    persist_channel_artifact(&self.sqlite_pool, &self.channel_id, artifact).await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.channel_id,
+                        artifact_id = %artifact.id,
+                        "failed to persist artifact from reply tool",
+                    );
+                } else {
+                    emit_artifact_created_event(
+                        &self.api_event_tx,
+                        &self.agent_id,
+                        &self.channel_id,
+                        artifact,
+                    );
+                }
+            }
+        }
+
         // Extract source from conversation_id (format: "platform:id")
-        let source = self.conversation_id
-            .split(':')
-            .next()
-            .unwrap_or("unknown");
+        let source = self.conversation_id.split(':').next().unwrap_or("unknown");
+
+        let stripped_content = strip_artifact_tags(&content);
 
         // Auto-convert @mentions to platform-specific syntax
-        let converted_content = convert_mentions(
-            &args.content,
+        let mut converted_content = convert_mentions(
+            &stripped_content,
             &self.channel_id,
             &self.conversation_logger,
             source,
-        ).await;
+        )
+        .await;
 
-        self.conversation_logger.log_bot_message(&self.channel_id, &converted_content);
-
-        let response = if let Some(ref name) = args.thread_name {
-            // Cap thread names at 100 characters (Discord limit)
-            let thread_name = if name.len() > 100 {
-                name[..name.floor_char_boundary(100)].to_string()
+        let has_rich_payload = cards.is_some() || interactive_elements.is_some() || poll.is_some();
+        if converted_content.trim().is_empty() && !artifacts.is_empty() {
+            converted_content = if artifacts.len() == 1 {
+                format!("Artifact ready: {}", artifacts[0].title)
             } else {
-                name.clone()
+                format!("{} artifacts ready.", artifacts.len())
             };
-            OutboundResponse::ThreadReply {
-                thread_name,
-                text: converted_content.clone(),
-            }
-        } else if args.cards.is_some() || args.interactive_elements.is_some() || args.poll.is_some() {
-            OutboundResponse::RichMessage {
-                text: converted_content.clone(),
-                blocks: vec![], // No block generation for now; Slack adapters will fall back to text
-                cards: args.cards.unwrap_or_default(),
-                interactive_elements: args.interactive_elements.unwrap_or_default(),
-                poll: args.poll,
-            }
-        } else {
-            OutboundResponse::Text(converted_content.clone())
-        };
+        }
 
-        self.response_tx
-            .send(response)
-            .await
-            .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
+        if !converted_content.trim().is_empty() {
+            self.conversation_logger
+                .log_bot_message(&self.channel_id, &converted_content);
+        }
 
-        // Mark the turn as handled so handle_agent_result skips the fallback send.
+        let should_send_response =
+            thread_name.is_some() || has_rich_payload || !converted_content.trim().is_empty();
+        if should_send_response {
+            let response = if let Some(ref name) = thread_name {
+                // Cap thread names at 100 characters (Discord limit)
+                let thread_name = if name.len() > 100 {
+                    name[..name.floor_char_boundary(100)].to_string()
+                } else {
+                    name.clone()
+                };
+                OutboundResponse::ThreadReply {
+                    thread_name,
+                    text: converted_content.clone(),
+                }
+            } else if has_rich_payload {
+                OutboundResponse::RichMessage {
+                    text: converted_content.clone(),
+                    blocks: vec![], // No block generation for now; Slack adapters will fall back to text
+                    cards: cards.unwrap_or_default(),
+                    interactive_elements: interactive_elements.unwrap_or_default(),
+                    poll,
+                }
+            } else {
+                OutboundResponse::Text(converted_content.clone())
+            };
+
+            self.response_tx
+                .send(response)
+                .await
+                .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
+        }
+
+        /*
+         * Mark the turn as handled so handle_agent_result skips the fallback send.
+         * This includes artifact-only replies where no text response is needed.
+         */
         self.skip_flag.store(true, Ordering::Relaxed);
 
         tracing::debug!(conversation_id = %self.conversation_id, "reply sent to outbound channel");

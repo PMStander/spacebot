@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useMemo, useState} from "react";
 import {
 	createRouter,
 	createRootRoute,
@@ -24,6 +24,7 @@ import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentChat} from "@/routes/AgentChat";
 import {AgentCanvas} from "@/routes/AgentCanvas";
+import {AgentArtifacts} from "@/routes/AgentArtifacts";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
@@ -52,10 +53,64 @@ function RootLayout() {
 }
 
 function AgentHeader({agentId}: {agentId: string}) {
+	const {liveStates, channels} = useLiveContext();
+
+	const activity = useMemo(() => {
+		let workers = 0;
+		let branches = 0;
+		let typing = 0;
+		for (const ch of channels) {
+			if (ch.agent_id !== agentId) continue;
+			const live = liveStates[ch.id];
+			if (!live) continue;
+			workers += Object.keys(live.workers).length;
+			branches += Object.keys(live.branches).length;
+			if (live.isTyping) typing++;
+		}
+		return {workers, branches, typing};
+	}, [channels, liveStates, agentId]);
+
+	const isActive = activity.workers > 0 || activity.branches > 0 || activity.typing > 0;
+
 	return (
 		<>
 			<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 				<h1 className="font-plex text-sm font-medium text-ink">{agentId}</h1>
+
+				<div className="ml-auto flex items-center gap-3">
+					{activity.workers > 0 && (
+						<div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs">
+							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+							<span className="font-medium tabular-nums text-amber-400">
+								{activity.workers} worker{activity.workers !== 1 ? "s" : ""}
+							</span>
+						</div>
+					)}
+					{activity.branches > 0 && (
+						<div className="flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-1 text-xs">
+							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+							<span className="font-medium tabular-nums text-violet-400">
+								{activity.branches} branch{activity.branches !== 1 ? "es" : ""}
+							</span>
+						</div>
+					)}
+					{activity.typing > 0 && (
+						<div className="flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-xs">
+							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+							<span className="font-medium text-accent">typing</span>
+						</div>
+					)}
+					<div className="flex items-center gap-1.5">
+						<div
+							className={`h-2 w-2 rounded-full ${
+								isActive ? "animate-pulse bg-amber-400" : "bg-green-500/60"
+							}`}
+						/>
+						<span className="text-xs text-ink-faint">
+							{isActive ? "Active" : "Idle"}
+						</span>
+					</div>
+				</div>
 			</header>
 			<AgentTabs agentId={agentId} />
 		</>
@@ -148,6 +203,22 @@ const agentCanvasRoute = createRoute({
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
 					<AgentCanvas agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
+const agentArtifactsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/artifacts",
+	component: function AgentArtifactsPage() {
+		const {agentId} = agentArtifactsRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentArtifacts agentId={agentId} />
 				</div>
 			</div>
 		);
@@ -361,6 +432,7 @@ const routeTree = rootRoute.addChildren([
 	agentRoute,
 	agentChatRoute,
 	agentCanvasRoute,
+	agentArtifactsRoute,
 	agentChannelsRoute,
 	agentChatsRoute,
 	chatDetailRoute,

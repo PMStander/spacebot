@@ -72,6 +72,7 @@ pub(super) struct InstanceOverviewResponse {
 #[derive(Serialize)]
 struct AgentSummary {
     id: String,
+    group: Option<String>,
     channel_count: usize,
     memory_total: i64,
     cron_job_count: usize,
@@ -197,6 +198,7 @@ pub(super) async fn create_agent(
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
         default: false,
+        group: None,
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -484,6 +486,7 @@ pub(super) async fn create_agent(
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
+            group: agent_config.group.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
@@ -888,6 +891,7 @@ pub(super) async fn instance_overview(
 
         agents.push(AgentSummary {
             id: agent_id,
+            group: agent_config.group.clone(),
             channel_count,
             memory_total,
             cron_job_count: cron_job_count as usize,

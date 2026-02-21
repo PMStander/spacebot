@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type CortexChatMessage } from "@/api/client";
+import {
+	api,
+	type CortexChatAttachmentRef,
+	type CortexChatMessage,
+} from "@/api/client";
 
 export interface ToolActivity {
 	tool: string;
@@ -178,27 +182,43 @@ export function useCortexChat(
 		[agentId, threadId],
 	);
 
-	const sendMessage = useCallback(async (text: string) => {
+	const sendMessage = useCallback(async (text: string, attachments: CortexChatAttachmentRef[] = []) => {
 		if (isStreaming || !threadId) return;
+		if (!text.trim() && attachments.length === 0) return;
 
 		setError(null);
 		setIsStreaming(true);
 		setToolActivity([]);
 		pendingArtifactRef.current = null;
 
+		const contentParts: string[] = [];
+		if (text.trim()) {
+			contentParts.push(text.trim());
+		}
+		if (attachments.length > 0) {
+			const labels = attachments.map((attachment) => attachment.filename).join(", ");
+			contentParts.push(`[attachments: ${labels}]`);
+		}
+
 		// Optimistically add user message
 		const userMessage: CortexChatMessage = {
 			id: `tmp-${Date.now()}`,
 			thread_id: threadId,
 			role: "user",
-			content: text,
+			content: contentParts.join("\n"),
 			channel_context: channelId ?? null,
 			created_at: new Date().toISOString(),
 		};
 		setMessages((prev) => [...prev, userMessage]);
 
 		try {
-			const response = await api.cortexChatSend(agentId, threadId, text, channelId);
+			const response = await api.cortexChatSend(
+				agentId,
+				threadId,
+				text,
+				channelId,
+				attachments,
+			);
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}

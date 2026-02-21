@@ -68,7 +68,15 @@ impl CliWorker {
         event_tx: broadcast::Sender<ProcessEvent>,
     ) -> (Self, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
-        let mut worker = Self::new(channel_id, agent_id, task, directory, backend_name, backend, event_tx);
+        let mut worker = Self::new(
+            channel_id,
+            agent_id,
+            task,
+            directory,
+            backend_name,
+            backend,
+            event_tx,
+        );
         worker.input_rx = Some(input_rx);
         (worker, input_tx)
     }
@@ -86,23 +94,32 @@ impl CliWorker {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        // Set custom environment variables
+        // Scrub secret environment variables from inherited environment
+        for var in crate::tools::shell::SECRET_ENV_VARS {
+            command.env_remove(var);
+        }
+
+        // Set custom environment variables (may intentionally re-add scrubbed vars)
         for (key, value) in &self.backend.env {
             command.env(key, value);
         }
 
-        let mut child = command
-            .spawn()
-            .with_context(|| format!(
+        let mut child = command.spawn().with_context(|| {
+            format!(
                 "failed to spawn CLI backend '{}' (command: '{}')",
                 self.backend_name, self.backend.command
-            ))?;
+            )
+        })?;
 
         // Write the task to stdin
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(self.task.as_bytes()).await
+            stdin
+                .write_all(self.task.as_bytes())
+                .await
                 .context("failed to write task to CLI worker stdin")?;
-            stdin.write_all(b"\n").await
+            stdin
+                .write_all(b"\n")
+                .await
                 .context("failed to write newline to CLI worker stdin")?;
 
             // For non-interactive workers, close stdin to signal end of input
@@ -146,9 +163,13 @@ impl CliWorker {
         self.send_status("running");
 
         // Stream stdout for status updates and capture output
-        let stdout = child.stdout.take()
+        let stdout = child
+            .stdout
+            .take()
             .context("failed to capture CLI worker stdout")?;
-        let stderr = child.stderr.take()
+        let stderr = child
+            .stderr
+            .take()
             .context("failed to capture CLI worker stderr")?;
 
         let worker_id = self.id;
@@ -221,10 +242,8 @@ impl CliWorker {
             }
         };
 
-        let stdout_output = stdout_handle.await
-            .unwrap_or_else(|_| String::new());
-        let stderr_lines = stderr_handle.await
-            .unwrap_or_default();
+        let stdout_output = stdout_handle.await.unwrap_or_else(|_| String::new());
+        let stderr_lines = stderr_handle.await.unwrap_or_default();
 
         if !exit_status.success() {
             let exit_code = exit_status.code().unwrap_or(-1);

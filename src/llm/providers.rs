@@ -8,11 +8,11 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
     // Provider clients are initialized lazily through LlmManager
     // This module exists for any provider-specific setup that needs to happen
     // during system startup
-    
+
     if config.anthropic_key.is_some() {
         tracing::info!("Anthropic provider configured");
     }
-    
+
     if config.openai_key.is_some() {
         tracing::info!("OpenAI provider configured");
     }
@@ -33,5 +33,9 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
         tracing::info!("Moonshot AI provider configured");
     }
 
+
+    if config.gemini_key.is_some() {
+        tracing::info!("Gemini provider configured");
+    }
     Ok(())
 }

@@ -116,6 +116,15 @@ export interface CanvasRemovedEvent {
 	panel_name: string;
 }
 
+export interface ArtifactCreatedEvent {
+	type: "artifact_created";
+	agent_id: string;
+	channel_id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+}
+
 export interface CanvasPanel {
 	id: string;
 	name: string;
@@ -142,6 +151,18 @@ export interface WebChatUploadResponse {
 	attachments: WebChatAttachmentRef[];
 }
 
+export interface CortexChatAttachmentRef {
+	id?: string;
+	filename: string;
+	mime_type: string;
+	path: string;
+	size_bytes: number;
+}
+
+export interface CortexChatUploadResponse {
+	attachments: CortexChatAttachmentRef[];
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -154,7 +175,8 @@ export type ApiEvent =
 	| ToolStartedEvent
 	| ToolCompletedEvent
 	| CanvasUpdatedEvent
-	| CanvasRemovedEvent;
+	| CanvasRemovedEvent
+	| ArtifactCreatedEvent;
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`, init);
@@ -193,7 +215,16 @@ export interface TimelineWorkerRun {
 	completed_at: string | null;
 }
 
-export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun;
+export interface TimelineArtifactNotice {
+	type: "artifact_notice";
+	id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+	created_at: string;
+}
+
+export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun | TimelineArtifactNotice;
 
 export interface MessagesResponse {
 	items: TimelineItem[];
@@ -249,6 +280,7 @@ export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
 export interface AgentInfo {
 	id: string;
+	group: string | null;
 	workspace: string;
 	context_window: number;
 	max_turns: number;
@@ -299,6 +331,7 @@ export interface AgentProfileResponse {
 
 export interface AgentSummary {
 	id: string;
+	group: string | null;
 	channel_count: number;
 	memory_total: number;
 	cron_job_count: number;
@@ -974,7 +1007,20 @@ export interface RawConfigUpdateResponse {
 export interface ArtifactInfo {
 	id: string;
 	channel_id: string | null;
-	kind: "code" | "text" | "image" | "sheet" | "book";
+	kind:
+		| "code"
+		| "text"
+		| "image"
+		| "sheet"
+		| "book"
+		| "html"
+		| "chart"
+		| "diagram"
+		| "checklist"
+		| "form"
+		| "kanban"
+		| "table"
+		| "graph";
 	title: string;
 	content: string;
 	metadata: Record<string, unknown> | null;
@@ -1072,7 +1118,13 @@ export const api = {
 		if (threadId) search.set("thread_id", threadId);
 		return fetchJson<CortexChatMessagesResponse>(`/cortex-chat/messages?${search}`);
 	},
-	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string) =>
+	cortexChatSend: (
+		agentId: string,
+		threadId: string,
+		message: string,
+		channelId?: string,
+		attachments: CortexChatAttachmentRef[] = [],
+	) =>
 		fetch(`${API_BASE}/cortex-chat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1081,8 +1133,24 @@ export const api = {
 				thread_id: threadId,
 				message,
 				channel_id: channelId ?? null,
+				attachments,
 			}),
 		}),
+	cortexChatUpload: async (agentId: string, files: File[]) => {
+		const formData = new FormData();
+		for (const file of files) {
+			formData.append("files", file);
+		}
+
+		const response = await fetch(
+			`${API_BASE}/cortex-chat/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<CortexChatUploadResponse>;
+	},
 	cortexChatSpawnWorker: (
 		agentId: string,
 		threadId: string,

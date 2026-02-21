@@ -579,8 +579,15 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let cli_config = rc.cli_workers.load();
+        let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
+        let cli_backends: Vec<(String, String)> = cli_config
+            .backends
+            .iter()
+            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
+            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
             .expect("failed to render worker capabilities");
 
         let status_text = {
@@ -773,8 +780,15 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let cli_config = rc.cli_workers.load();
+        let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
+        let cli_backends: Vec<(String, String)> = cli_config
+            .backends
+            .iter()
+            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
+            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
             .expect("failed to render worker capabilities");
 
         let status_text = {
@@ -919,7 +933,34 @@ impl Channel {
                     // attempt to extract the reply content and send that instead.
                     let text = response.trim();
                     let extracted = extract_reply_from_tool_syntax(text);
-                    let final_text = extracted.as_deref().unwrap_or(text);
+                    let mut final_text = extracted.as_deref().unwrap_or(text).to_string();
+
+                    let artifacts = parse_artifact_tags(&final_text);
+                    if !artifacts.is_empty() {
+                        for artifact in &artifacts {
+                            if let Err(error) =
+                                persist_channel_artifact(&self.deps.sqlite_pool, &self.id, artifact)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    channel_id = %self.id,
+                                    artifact_id = %artifact.id,
+                                    "failed to persist channel artifact",
+                                );
+                            } else {
+                                emit_artifact_created_event(
+                                    &self.deps.api_event_tx,
+                                    &self.deps.agent_id,
+                                    &self.id,
+                                    artifact,
+                                );
+                            }
+                        }
+                        final_text = strip_artifact_tags(&final_text);
+                    }
+
+                    let final_text = final_text.trim();
                     if !final_text.is_empty() {
                         if extracted.is_some() {
                             tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
@@ -1027,7 +1068,37 @@ impl Channel {
                 notify,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result);
+                let artifacts = parse_artifact_tags(result);
+                if !artifacts.is_empty() {
+                    for artifact in &artifacts {
+                        if let Err(error) =
+                            persist_channel_artifact(&self.deps.sqlite_pool, &self.id, artifact)
+                                .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                channel_id = %self.id,
+                                artifact_id = %artifact.id,
+                                "failed to persist worker artifact",
+                            );
+                        } else {
+                            emit_artifact_created_event(
+                                &self.deps.api_event_tx,
+                                &self.deps.agent_id,
+                                &self.id,
+                                artifact,
+                            );
+                        }
+                    }
+                }
+
+                let worker_result = if artifacts.is_empty() {
+                    result.clone()
+                } else {
+                    strip_artifact_tags(result)
+                };
+
+                run_logger.log_worker_completed(*worker_id, &worker_result);
 
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
@@ -1038,7 +1109,7 @@ impl Channel {
 
                 if *notify {
                     let mut history = self.state.history.write().await;
-                    let worker_message = format!("[Worker completed]: {result}");
+                    let worker_message = format!("[Worker completed]: {worker_result}");
                     history.push(rig::message::Message::from(worker_message));
                     should_retrigger = true;
                 }
@@ -1681,6 +1752,122 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
     }
 
     None
+}
+
+#[derive(Debug, Clone)]
+struct ParsedArtifact {
+    id: String,
+    kind: String,
+    title: String,
+    content: String,
+}
+
+/// Parse `<artifact kind="..." title="...">...</artifact>` blocks from text.
+fn parse_artifact_tags(text: &str) -> Vec<ParsedArtifact> {
+    let mut results = Vec::new();
+    let mut pos = 0;
+
+    while let Some(rel_start) = text[pos..].find("<artifact") {
+        let start = pos + rel_start;
+
+        let Some(rel_tag_end) = text[start..].find('>') else {
+            break;
+        };
+        let tag_end = start + rel_tag_end + 1;
+        let tag = &text[start..tag_end];
+
+        let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
+        let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
+        let id = extract_attr(tag, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let Some(rel_close) = text[tag_end..].find("</artifact>") else {
+            break;
+        };
+        let content_end = tag_end + rel_close;
+        let content = text[tag_end..content_end].trim().to_string();
+
+        results.push(ParsedArtifact {
+            id,
+            kind,
+            title,
+            content,
+        });
+        pos = content_end + "</artifact>".len();
+    }
+
+    results
+}
+
+/// Remove all `<artifact>...</artifact>` blocks and return remaining text.
+fn strip_artifact_tags(text: &str) -> String {
+    let mut result = text.to_string();
+
+    loop {
+        let Some(start) = result.find("<artifact") else {
+            break;
+        };
+        let Some(rel_close) = result[start..].find("</artifact>") else {
+            break;
+        };
+        let end = start + rel_close + "</artifact>".len();
+        result.replace_range(start..end, "");
+    }
+
+    result.trim().to_string()
+}
+
+fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+    let pattern = format!("{}=\"", attr);
+    let start = tag.find(&pattern)? + pattern.len();
+    let end = tag[start..].find('"')?;
+    Some(tag[start..start + end].to_string())
+}
+
+async fn persist_channel_artifact(
+    sqlite_pool: &sqlx::SqlitePool,
+    channel_id: &ChannelId,
+    artifact: &ParsedArtifact,
+) -> std::result::Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO artifacts (id, channel_id, kind, title, content, metadata, version, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
+         ON CONFLICT(id) DO UPDATE SET \
+            kind = excluded.kind, \
+            title = excluded.title, \
+            content = excluded.content, \
+            metadata = excluded.metadata, \
+            version = artifacts.version + 1, \
+            updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(&artifact.id)
+    .bind(channel_id.as_ref())
+    .bind(&artifact.kind)
+    .bind(&artifact.title)
+    .bind(&artifact.content)
+    .bind(Option::<String>::None)
+    .execute(sqlite_pool)
+    .await?;
+
+    Ok(())
+}
+
+fn emit_artifact_created_event(
+    api_event_tx: &Option<tokio::sync::broadcast::Sender<crate::api::ApiEvent>>,
+    agent_id: &crate::AgentId,
+    channel_id: &ChannelId,
+    artifact: &ParsedArtifact,
+) {
+    let Some(api_event_tx) = api_event_tx else {
+        return;
+    };
+
+    let _ = api_event_tx.send(crate::api::ApiEvent::ArtifactCreated {
+        agent_id: agent_id.to_string(),
+        channel_id: channel_id.to_string(),
+        artifact_id: artifact.id.clone(),
+        kind: artifact.kind.clone(),
+        title: artifact.title.clone(),
+    });
 }
 
 /// Format a user message with sender attribution from message metadata.

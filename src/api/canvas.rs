@@ -1,8 +1,8 @@
 use super::state::ApiState;
 
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -41,21 +41,27 @@ pub(super) async fn list_canvas_panels(
     Query(query): Query<CanvasQuery>,
 ) -> Result<Json<CanvasPanelsResponse>, StatusCode> {
     let pools = state.agent_pools.load();
-    let pool = pools
-        .get(&query.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
-    let rows: Vec<(String, String, String, String, i64, Option<String>, String, String)> =
-        sqlx::query_as(
-            "SELECT id, name, title, content, position, metadata, created_at, updated_at \
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT id, name, title, content, position, metadata, created_at, updated_at \
              FROM canvas_panels ORDER BY position ASC, created_at ASC",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "failed to list canvas panels");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "failed to list canvas panels");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let panels = rows
         .into_iter()

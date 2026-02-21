@@ -1,12 +1,13 @@
-import { useCallback, useMemo } from "react";
-import { Link, useMatchRoute, useNavigate } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { Link, useMatchRoute } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { api, BASE_PATH, type ChannelInfo } from "@/api/client";
+import { api, BASE_PATH } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { Button } from "@/ui";
-import { ArrowLeft01Icon, DashboardSquare01Icon, LeftToRightListBulletIcon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { ArrowLeft01Icon, DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -31,28 +32,36 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	const channels = channelsData?.channels ?? [];
 
 	const matchRoute = useMatchRoute();
-	const navigate = useNavigate();
-	const queryClient = useQueryClient();
 	const isOverview = matchRoute({ to: "/" });
 	const isSettings = matchRoute({ to: "/settings" });
 
-	const handleCreateAgent = useCallback(async () => {
-		const name = window.prompt("Enter a name for the new agent:")?.trim().toLowerCase().replace(/\s+/g, "-");
-		if (!name) return;
-		try {
-			await api.createAgent(name);
-			// Wait for the agent to be initialized by the backend
-			for (let i = 0; i < 20; i++) {
-				await new Promise((r) => setTimeout(r, 500));
-				const data = await api.agents();
-				if (data.agents.some((a) => a.id === name)) break;
+	const [createDialogOpen, setCreateDialogOpen] = useState(false);
+
+	// Group agents by their group field, preserving order within groups.
+	// Groups appear in the order their first agent appears. Ungrouped agents come last.
+	const groupedAgents = useMemo(() => {
+		const groups: { name: string | null; agents: typeof agents }[] = [];
+		const groupMap = new Map<string | null, typeof agents>();
+		const groupOrder: (string | null)[] = [];
+		for (const agent of agents) {
+			const key = agent.group ?? null;
+			if (!groupMap.has(key)) {
+				groupMap.set(key, []);
+				groupOrder.push(key);
 			}
-			await queryClient.invalidateQueries({ queryKey: ["agents"] });
-			navigate({ to: "/agents/$agentId/config", params: { agentId: name } });
-		} catch (error) {
-			window.alert(error instanceof Error ? error.message : "Failed to create agent");
+			groupMap.get(key)!.push(agent);
 		}
-	}, [navigate, queryClient]);
+		// Named groups first (in order), then ungrouped
+		const named = groupOrder.filter((k) => k !== null);
+		const hasUngrouped = groupMap.has(null);
+		for (const key of named) {
+			groups.push({ name: key, agents: groupMap.get(key)! });
+		}
+		if (hasUngrouped) {
+			groups.push({ name: null, agents: groupMap.get(null)! });
+		}
+		return groups;
+	}, [agents]);
 
 	const agentActivity = useMemo(() => {
 		const byAgent: Record<string, { workers: number; branches: number }> = {};
@@ -120,22 +129,31 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
 				</Link>
 				<div className="my-1 h-px w-5 bg-sidebar-line" />
-					{agents.map((agent) => {
-						const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
-						return (
-							<Link
-								key={agent.id}
-								to="/agents/$agentId"
-								params={{ agentId: agent.id }}
-								className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium ${
-									isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-								}`}
-								title={agent.id}
-							>
-								{agent.id.charAt(0).toUpperCase()}
-							</Link>
-						);
-					})}
+					{groupedAgents.map((group) => (
+						<div key={group.name ?? "__ungrouped"} className="flex flex-col items-center gap-1">
+							{group.name && (
+								<span className="mt-1 text-[9px] font-medium uppercase tracking-wider text-sidebar-inkFaint" title={group.name}>
+									{group.name.charAt(0).toUpperCase()}
+								</span>
+							)}
+							{group.agents.map((agent) => {
+								const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
+								return (
+									<Link
+										key={agent.id}
+										to="/agents/$agentId"
+										params={{ agentId: agent.id }}
+										className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium ${
+											isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+										}`}
+										title={agent.id}
+									>
+										{agent.id.charAt(0).toUpperCase()}
+									</Link>
+								);
+							})}
+						</div>
+					))}
 				</div>
 			) : (
 				<>
@@ -165,61 +183,71 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 					{/* Agents */}
 					<div className="flex flex-1 flex-col overflow-y-auto pt-3">
-						<span className="px-3 pb-1 text-tiny font-medium uppercase tracking-wider text-sidebar-inkFaint">
-							Agents
-						</span>
 						{agents.length === 0 ? (
-							<span className="px-3 py-2 text-tiny text-sidebar-inkFaint">
-								No agents configured
-							</span>
+							<>
+								<span className="px-3 pb-1 text-tiny font-medium uppercase tracking-wider text-sidebar-inkFaint">
+									Agents
+								</span>
+								<span className="px-3 py-2 text-tiny text-sidebar-inkFaint">
+									No agents configured
+								</span>
+							</>
 						) : (
-							<div className="flex flex-col gap-0.5">
-								{agents.map((agent) => {
-									const activity = agentActivity[agent.id];
-									const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
+							groupedAgents.map((group) => (
+								<div key={group.name ?? "__ungrouped"} className="mb-1">
+									<span className="px-3 pb-1 text-tiny font-medium uppercase tracking-wider text-sidebar-inkFaint">
+										{group.name ?? "Agents"}
+									</span>
+									<div className="flex flex-col gap-0.5">
+										{group.agents.map((agent) => {
+											const activity = agentActivity[agent.id];
+											const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
 
-									return (
-										<Link
-											key={agent.id}
-											to="/agents/$agentId"
-											params={{ agentId: agent.id }}
-											className={`mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-												isActive
-													? "bg-sidebar-selected text-sidebar-ink"
-													: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-											}`}
-										>
-											<span className="flex-1 truncate">{agent.id}</span>
-											{activity && (activity.workers > 0 || activity.branches > 0) && (
-												<div className="flex items-center gap-1">
-													{activity.workers > 0 && (
-														<span className="rounded bg-amber-500/15 px-1 py-0.5 text-tiny text-amber-400">
-															{activity.workers}w
-														</span>
+											return (
+												<Link
+													key={agent.id}
+													to="/agents/$agentId"
+													params={{ agentId: agent.id }}
+													className={`mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
+														isActive
+															? "bg-sidebar-selected text-sidebar-ink"
+															: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+													}`}
+												>
+													<span className="flex-1 truncate">{agent.id}</span>
+													{activity && (activity.workers > 0 || activity.branches > 0) && (
+														<div className="flex items-center gap-1">
+															{activity.workers > 0 && (
+																<span className="rounded bg-amber-500/15 px-1 py-0.5 text-tiny text-amber-400">
+																	{activity.workers}w
+																</span>
+															)}
+															{activity.branches > 0 && (
+																<span className="rounded bg-violet-500/15 px-1 py-0.5 text-tiny text-violet-400">
+																	{activity.branches}b
+																</span>
+															)}
+														</div>
 													)}
-													{activity.branches > 0 && (
-														<span className="rounded bg-violet-500/15 px-1 py-0.5 text-tiny text-violet-400">
-															{activity.branches}b
-														</span>
-													)}
-												</div>
-											)}
-										</Link>
-									);
-								})}
-							</div>
+												</Link>
+											);
+										})}
+									</div>
+								</div>
+							))
 						)}
 						<Button
 							variant="outline"
 							size="sm"
 							className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
-							onClick={handleCreateAgent}
+							onClick={() => setCreateDialogOpen(true)}
 						>
 							+ New Agent
 						</Button>
 					</div>
 				</>
 			)}
+			<CreateAgentDialog open={createDialogOpen} onOpenChange={setCreateDialogOpen} />
 		</motion.nav>
 	);
 }

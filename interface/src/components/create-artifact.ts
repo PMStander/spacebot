@@ -61,6 +61,7 @@ export type ArtifactContentProps<M = any> = {
 	setMetadata: Dispatch<SetStateAction<M>>;
 	getVersionContentById: (index: number) => string;
 	sendMessage?: (text: string) => void;
+	agentId?: string;
 };
 
 type ArtifactConfig<T extends string, M = any> = {

@@ -32,6 +32,30 @@ export function Overview({ liveStates }: OverviewProps) {
 	const channels = channelsData?.channels ?? [];
 	const agents = overviewData?.agents ?? [];
 
+	// Group agents by their group field
+	const groupedAgents = useMemo(() => {
+		const groups: { name: string | null; agents: typeof agents }[] = [];
+		const groupMap = new Map<string | null, typeof agents>();
+		const groupOrder: (string | null)[] = [];
+		for (const agent of agents) {
+			const key = agent.group ?? null;
+			if (!groupMap.has(key)) {
+				groupMap.set(key, []);
+				groupOrder.push(key);
+			}
+			groupMap.get(key)!.push(agent);
+		}
+		const named = groupOrder.filter((k) => k !== null);
+		const hasUngrouped = groupMap.has(null);
+		for (const key of named) {
+			groups.push({ name: key, agents: groupMap.get(key)! });
+		}
+		if (hasUngrouped) {
+			groups.push({ name: null, agents: groupMap.get(null)! });
+		}
+		return groups;
+	}, [agents]);
+
 	// Aggregate live activity across all agents
 	const activity = useMemo(() => {
 		let workers = 0;
@@ -89,19 +113,23 @@ export function Overview({ liveStates }: OverviewProps) {
 					</div>
 				) : (
 					<div className="flex flex-col gap-6">
-						{/* Agent Cards */}
-						<section>
-							<h2 className="mb-4 font-plex text-sm font-medium text-ink-dull">Agents</h2>
-							<div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
-								{agents.map((agent) => (
-									<AgentCard
-										key={agent.id}
-										agent={agent}
-										liveActivity={getAgentActivity(agent.id)}
-									/>
-								))}
-							</div>
-						</section>
+						{/* Agent Cards — grouped */}
+						{groupedAgents.map((group) => (
+							<section key={group.name ?? "__ungrouped"}>
+								<h2 className="mb-4 font-plex text-sm font-medium text-ink-dull">
+									{group.name ?? "Agents"}
+								</h2>
+								<div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
+									{group.agents.map((agent) => (
+										<AgentCard
+											key={agent.id}
+											agent={agent}
+											liveActivity={getAgentActivity(agent.id)}
+										/>
+									))}
+								</div>
+							</section>
+						))}
 
 						{/* Recent Channels */}
 						{recentChannels.length > 0 && (

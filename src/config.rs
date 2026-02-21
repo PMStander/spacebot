@@ -150,6 +150,7 @@ pub struct LlmConfig {
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub moonshot_key: Option<String>,
+    pub gemini_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -175,6 +176,7 @@ impl LlmConfig {
             || self.minimax_key.is_some()
             || self.moonshot_key.is_some()
             || self.zai_coding_plan_key.is_some()
+            || self.gemini_key.is_some()
             || !self.providers.is_empty()
     }
 }
@@ -184,6 +186,7 @@ const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
+const GEMINI_PROVIDER_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
@@ -415,6 +418,8 @@ impl Default for CortexConfig {
 pub struct AgentConfig {
     pub id: String,
     pub default: bool,
+    /// Optional group name for organizing agents in the UI.
+    pub group: Option<String>,
     /// Custom workspace path. If None, resolved to instance_dir/agents/{id}/workspace.
     pub workspace: Option<PathBuf>,
     /// Per-agent routing overrides. None inherits from defaults.
@@ -453,6 +458,7 @@ pub struct CronDef {
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub id: String,
+    pub group: Option<String>,
     pub workspace: PathBuf,
     pub data_dir: PathBuf,
     pub archives_dir: PathBuf,
@@ -506,6 +512,7 @@ impl AgentConfig {
 
         ResolvedAgentConfig {
             id: self.id.clone(),
+            group: self.group.clone(),
             workspace: self
                 .workspace
                 .clone()
@@ -1120,6 +1127,7 @@ struct TomlLlmConfigFields {
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
+    gemini_key: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -1147,6 +1155,7 @@ struct TomlLlmConfig {
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
+    gemini_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -1199,6 +1208,8 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             minimax_key: fields.minimax_key,
             moonshot_key: fields.moonshot_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
+            gemini_key: fields.gemini_key,
+
             providers: fields.providers,
         })
     }
@@ -1331,6 +1342,7 @@ struct TomlAgentConfig {
     id: String,
     #[serde(default)]
     default: bool,
+    group: Option<String>,
     workspace: Option<String>,
     routing: Option<TomlRoutingConfig>,
     max_concurrent_branches: Option<usize>,
@@ -1558,6 +1570,7 @@ impl Config {
             || std::env::var("OLLAMA_API_KEY").is_ok()
             || std::env::var("OLLAMA_BASE_URL").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("GEMINI_API_KEY").is_ok()
             || std::env::var("MINIMAX_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
@@ -1626,6 +1639,7 @@ impl Config {
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
+            gemini_key: std::env::var("GEMINI_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
@@ -1718,6 +1732,17 @@ impl Config {
                 });
         }
 
+        if let Some(gemini_key) = llm.gemini_key.clone() {
+            llm.providers
+                .entry("gemini".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+                    api_key: gemini_key,
+                    name: None,
+                });
+        }
+
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
@@ -1733,6 +1758,7 @@ impl Config {
         let agents = vec![AgentConfig {
             id: "main".into(),
             default: true,
+            group: None,
             workspace: None,
             routing: Some(routing),
             max_concurrent_branches: None,
@@ -1921,6 +1947,12 @@ impl Config {
             providers: toml
                 .llm
                 .providers
+            gemini_key: toml
+                .llm
+                .gemini_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GEMINI_API_KEY").ok()),
                 .into_iter()
                 .map(|(provider_id, config)| {
                     (
@@ -2025,6 +2057,17 @@ impl Config {
                 });
         }
 
+
+        if let Some(gemini_key) = llm.gemini_key.clone() {
+            llm.providers
+                .entry("gemini".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+                    api_key: gemini_key,
+                    name: None,
+                });
+        }
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
@@ -2264,6 +2307,7 @@ impl Config {
                 AgentConfig {
                     id: a.id,
                     default: a.default,
+                    group: a.group,
                     workspace: a.workspace.map(PathBuf::from),
                     routing: agent_routing,
                     max_concurrent_branches: a.max_concurrent_branches,
@@ -2363,6 +2407,7 @@ impl Config {
             agents.push(AgentConfig {
                 id: "main".into(),
                 default: true,
+                group: None,
                 workspace: None,
                 routing: None,
                 max_concurrent_branches: None,

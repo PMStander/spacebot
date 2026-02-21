@@ -1,8 +1,8 @@
 use super::state::{ApiEvent, ApiState};
 
+use axum::Json;
 use axum::extract::State;
 use axum::response::Sse;
-use axum::Json;
 use futures::stream::Stream;
 use serde::Serialize;
 use std::convert::Infallible;
@@ -87,6 +87,7 @@ pub(super) async fn events_sse(
                             ApiEvent::ConfigReloaded => "config_reloaded",
                             ApiEvent::CanvasUpdated { .. } => "canvas_updated",
                             ApiEvent::CanvasRemoved { .. } => "canvas_removed",
+                            ApiEvent::ArtifactCreated { .. } => "artifact_created",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

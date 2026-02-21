@@ -1,8 +1,8 @@
 use super::state::ApiState;
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,9 +67,7 @@ struct ModelsDevModalities {
 /// Cached model catalog fetched from models.dev.
 static MODELS_CACHE: std::sync::LazyLock<
     tokio::sync::RwLock<(Vec<ModelInfo>, std::time::Instant)>,
-> = std::sync::LazyLock::new(|| {
-    tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now()))
-});
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now())));
 
 const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -149,7 +147,7 @@ fn extra_models() -> Vec<ModelInfo> {
             tool_call: true,
             reasoning: false,
         },
-                // Z.AI Coding Plan
+        // Z.AI Coding Plan
         ModelInfo {
             id: "zai-coding-plan/glm-4.7".into(),
             name: "GLM 4.7 (Coding)".into(),
@@ -176,7 +174,6 @@ fn extra_models() -> Vec<ModelInfo> {
         },
         // MiniMax
         ModelInfo {
-
             id: "minimax/MiniMax-M1-80k".into(),
             name: "MiniMax M1 80K".into(),
             provider: "minimax".into(),
@@ -315,21 +312,51 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
         std::env::var(env_var).is_ok()
     };
 
-    if has_key("anthropic_key", "ANTHROPIC_API_KEY") { providers.push("anthropic"); }
-    if has_key("openai_key", "OPENAI_API_KEY") { providers.push("openai"); }
-    if has_key("openrouter_key", "OPENROUTER_API_KEY") { providers.push("openrouter"); }
-    if has_key("zhipu_key", "ZHIPU_API_KEY") { providers.push("zhipu"); }
-    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") { providers.push("zhipu-sub"); }
-    if has_key("groq_key", "GROQ_API_KEY") { providers.push("groq"); }
-    if has_key("together_key", "TOGETHER_API_KEY") { providers.push("together"); }
-    if has_key("fireworks_key", "FIREWORKS_API_KEY") { providers.push("fireworks"); }
-    if has_key("deepseek_key", "DEEPSEEK_API_KEY") { providers.push("deepseek"); }
-    if has_key("xai_key", "XAI_API_KEY") { providers.push("xai"); }
-    if has_key("mistral_key", "MISTRAL_API_KEY") { providers.push("mistral"); }
-    if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") { providers.push("opencode-zen"); }
-    if has_key("minimax_key", "MINIMAX_API_KEY") { providers.push("minimax"); }
-    if has_key("moonshot_key", "MOONSHOT_API_KEY") { providers.push("moonshot"); }
-    if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") { providers.push("zai-coding-plan"); }
+    if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
+        providers.push("anthropic");
+    }
+    if has_key("openai_key", "OPENAI_API_KEY") {
+        providers.push("openai");
+    }
+    if has_key("openrouter_key", "OPENROUTER_API_KEY") {
+        providers.push("openrouter");
+    }
+    if has_key("zhipu_key", "ZHIPU_API_KEY") {
+        providers.push("zhipu");
+    }
+    if has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY") {
+        providers.push("zhipu-sub");
+    }
+    if has_key("groq_key", "GROQ_API_KEY") {
+        providers.push("groq");
+    }
+    if has_key("together_key", "TOGETHER_API_KEY") {
+        providers.push("together");
+    }
+    if has_key("fireworks_key", "FIREWORKS_API_KEY") {
+        providers.push("fireworks");
+    }
+    if has_key("deepseek_key", "DEEPSEEK_API_KEY") {
+        providers.push("deepseek");
+    }
+    if has_key("xai_key", "XAI_API_KEY") {
+        providers.push("xai");
+    }
+    if has_key("mistral_key", "MISTRAL_API_KEY") {
+        providers.push("mistral");
+    }
+    if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
+        providers.push("opencode-zen");
+    }
+    if has_key("minimax_key", "MINIMAX_API_KEY") {
+        providers.push("minimax");
+    }
+    if has_key("moonshot_key", "MOONSHOT_API_KEY") {
+        providers.push("moonshot");
+    }
+    if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
+        providers.push("zai-coding-plan");
+    }
 
     providers
 }

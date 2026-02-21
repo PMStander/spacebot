@@ -219,6 +219,45 @@ impl CortexChatStore {
         Ok(id)
     }
 
+    /// Persist or update an artifact referenced from a cortex response.
+    pub async fn save_artifact(
+        &self,
+        artifact_id: &str,
+        channel_id: Option<&str>,
+        kind: &str,
+        title: &str,
+        content: &str,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), sqlx::Error> {
+        let metadata_json = metadata.map(|m| m.to_string());
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        sqlx::query(
+            "INSERT INTO artifacts (id, channel_id, kind, title, content, metadata, version, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET \
+                channel_id = excluded.channel_id, \
+                kind = excluded.kind, \
+                title = excluded.title, \
+                content = excluded.content, \
+                metadata = excluded.metadata, \
+                version = artifacts.version + 1, \
+                updated_at = excluded.updated_at",
+        )
+        .bind(artifact_id)
+        .bind(channel_id)
+        .bind(kind)
+        .bind(title)
+        .bind(content)
+        .bind(&metadata_json)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Get the most recent thread_id, or None if no threads exist.
     pub async fn latest_thread_id(&self) -> Result<Option<String>, sqlx::Error> {
         let row: Option<(String,)> = sqlx::query_as(
@@ -469,6 +508,17 @@ impl CortexChatSession {
 
                     // Emit artifact events after Done so the client can open the panel
                     for (artifact_id, kind, title, content) in artifacts {
+                        if let Err(error) = store
+                            .save_artifact(&artifact_id, channel_ref, &kind, &title, &content, None)
+                            .await
+                        {
+                            tracing::warn!(
+                                %error,
+                                artifact_id = %artifact_id,
+                                "failed to persist cortex artifact"
+                            );
+                        }
+
                         let _ = event_tx.send(CortexChatEvent::ArtifactStart {
                             artifact_id: artifact_id.clone(),
                             kind: kind.clone(),
@@ -506,8 +556,15 @@ impl CortexChatSession {
         let browser_enabled = runtime_config.browser_config.load().enabled;
         let web_search_enabled = runtime_config.brave_search_key.load().is_some();
         let opencode_enabled = runtime_config.opencode.load().enabled;
+        let cli_config = runtime_config.cli_workers.load();
+        let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
+        let cli_backends: Vec<(String, String)> = cli_config
+            .backends
+            .iter()
+            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
+            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
             .expect("failed to render worker capabilities");
 
         // Load channel transcript if a channel context is active
@@ -606,6 +663,8 @@ fn parse_artifact_tags(text: &str) -> Vec<(String, String, String, String)> {
 
         let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
         let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
+        let artifact_id =
+            extract_attr(tag, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         // Find the closing tag
         let Some(rel_close) = text[tag_end..].find("</artifact>") else {
@@ -614,7 +673,7 @@ fn parse_artifact_tags(text: &str) -> Vec<(String, String, String, String)> {
         let content_end = tag_end + rel_close;
         let content = text[tag_end..content_end].trim().to_string();
 
-        results.push((uuid::Uuid::new_v4().to_string(), kind, title, content));
+        results.push((artifact_id, kind, title, content));
         pos = content_end + "</artifact>".len();
     }
 

@@ -9,6 +9,8 @@ interface PanelCanvasProps {
 	doc: BookDocument;
 	metadata: BookMetadata;
 	isCurrentVersion: boolean;
+	isSelectedPanel: boolean;
+	onSelectPanel: () => void;
 	onSelectBubble: (id: string | null) => void;
 	onUpdateBubble: (bubbleId: string, patch: Partial<Bubble>) => void;
 	onAddBubble: (bubble: Bubble) => void;
@@ -20,17 +22,22 @@ export function PanelCanvas({
 	doc,
 	metadata,
 	isCurrentVersion,
+	isSelectedPanel,
+	onSelectPanel,
 	onSelectBubble,
 	onUpdateBubble,
 	onAddBubble,
 }: PanelCanvasProps) {
 	const [imgError, setImgError] = useState(false);
-	const imgSrc = panelImageUrl(doc.outputDir, page.number, panel.index);
+	const imgSrc = panelImageUrl(doc.outputDir, page.number, panel.image, panel.index);
 
 	return (
 		<div
-			className="relative select-none overflow-hidden rounded-md border border-app-line/30 bg-app-darkBox"
+			className={`relative select-none overflow-hidden rounded-md border bg-app-darkBox ${
+				isSelectedPanel ? "border-accent/70" : "border-app-line/30"
+			}`}
 			onClick={(e) => {
+				onSelectPanel();
 				// Clicking the panel background (not a bubble) clears selection
 				if (!(e.target as Element).closest("[data-bubble]")) {
 					onSelectBubble(null);

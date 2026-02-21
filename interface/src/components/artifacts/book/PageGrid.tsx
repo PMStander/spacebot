@@ -63,13 +63,23 @@ export function PageGrid({
 		dragFromIndex.current = null;
 	};
 
+	const pagePreview = (page: BookPage): string => {
+		if (page.text?.trim()) return page.text.trim();
+		if (page.readAloud?.trim()) return page.readAloud.trim();
+		if (page.activity?.trim()) return page.activity.trim();
+		if (page.puzzle?.instructions?.trim()) return page.puzzle.instructions.trim();
+		if (page.drawing?.prompt?.trim()) return page.drawing.prompt.trim();
+		if (page.illustrationPrompt?.trim()) return page.illustrationPrompt.trim();
+		return "No preview text";
+	};
+
 	return (
 		<div className="grid grid-cols-3 gap-3 overflow-auto p-4 xl:grid-cols-4">
 			{doc.pages.map((page: BookPage, i: number) => {
 				const firstPanel = page.panels[0];
 				const thumbSrc =
-					firstPanel && doc.outputDir
-						? panelImageUrl(doc.outputDir, page.number, firstPanel.index)
+					firstPanel
+						? panelImageUrl(doc.outputDir, page.number, firstPanel.image, firstPanel.index)
 						: null;
 
 				const isSelected = i === metadata.selectedPageIndex && metadata.view === "page";
@@ -102,10 +112,13 @@ export function PageGrid({
 										className="h-full w-full object-cover"
 										loading="lazy"
 										draggable={false}
+										onError={(e) => {
+											(e.target as HTMLImageElement).style.display = "none";
+										}}
 									/>
 								) : (
-									<div className="flex h-full w-full items-center justify-center text-tiny text-ink-faint">
-										No image
+									<div className="flex h-full w-full items-center justify-center p-2 text-center text-tiny text-ink-faint">
+										<span className="line-clamp-5">{pagePreview(page)}</span>
 									</div>
 								)}
 							</div>
@@ -117,6 +130,11 @@ export function PageGrid({
 							{page.panels.length > 1 && (
 								<span className="text-tiny text-ink-faint/60">
 									{page.panels.length} panels
+								</span>
+							)}
+							{page.panels.length <= 1 && page.puzzle?.type && (
+								<span className="text-tiny text-ink-faint/60">
+									{page.puzzle.type}
 								</span>
 							)}
 						</div>

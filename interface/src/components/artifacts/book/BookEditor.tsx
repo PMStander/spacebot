@@ -4,6 +4,7 @@ import { normalizeFromComicJson, serializeToComicJson } from "./types";
 import type { BookDocument, BookMetadata } from "./types";
 import { PageGrid } from "./PageGrid";
 import { PageEditor } from "./PageEditor";
+import { StructuredBookEditor } from "./StructuredBookEditor";
 
 export function BookEditor({
 	content,
@@ -12,6 +13,8 @@ export function BookEditor({
 	setMetadata,
 	onSaveContent,
 	isCurrentVersion,
+	sendMessage,
+	agentId,
 }: ArtifactContentProps<BookMetadata>) {
 	const doc: BookDocument | null = useMemo(() => {
 		if (!content) return null;
@@ -58,6 +61,21 @@ export function BookEditor({
 		);
 	}
 
+	const isComicMode = doc.bookType === "comic";
+
+	if (!isComicMode) {
+		return (
+			<StructuredBookEditor
+				doc={doc}
+				metadata={metadata}
+				setMetadata={setMetadata}
+				onSaveDoc={saveDoc}
+				isCurrentVersion={isCurrentVersion}
+				sendMessage={sendMessage}
+			/>
+		);
+	}
+
 	return (
 		<PageEditor
 			doc={doc}
@@ -65,6 +83,8 @@ export function BookEditor({
 			setMetadata={setMetadata}
 			onSaveDoc={saveDoc}
 			isCurrentVersion={isCurrentVersion}
+			sendMessage={sendMessage}
+			agentId={agentId}
 		/>
 	);
 }

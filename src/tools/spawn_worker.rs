@@ -1,7 +1,10 @@
 //! Spawn worker tool for creating new workers.
 
-use crate::agent::channel::{ChannelState, spawn_worker_from_state, spawn_opencode_worker_from_state, spawn_cli_worker_from_state};
 use crate::WorkerId;
+use crate::agent::channel::{
+    ChannelState, spawn_cli_worker_from_state, spawn_opencode_worker_from_state,
+    spawn_worker_from_state,
+};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -95,7 +98,9 @@ impl Tool for SpawnWorkerTool {
         };
 
         let cli_note = if cli_enabled {
-            let backend_list: Vec<String> = cli_workers_config.backends.iter()
+            let backend_list: Vec<String> = cli_workers_config
+                .backends
+                .iter()
                 .map(|(name, config)| {
                     if config.description.is_empty() {
                         name.clone()
@@ -143,7 +148,8 @@ impl Tool for SpawnWorkerTool {
             }
             if cli_enabled {
                 worker_type_enum.push("cli");
-                worker_type_desc.push_str(" \"cli\" spawns an external CLI agent (requires backend name).");
+                worker_type_desc
+                    .push_str(" \"cli\" spawns an external CLI agent (requires backend name).");
             }
             properties.as_object_mut().unwrap().insert(
                 "worker_type".to_string(),
@@ -163,7 +169,11 @@ impl Tool for SpawnWorkerTool {
             );
         }
         if cli_enabled {
-            let backend_names: Vec<&str> = cli_workers_config.backends.keys().map(|s| s.as_str()).collect();
+            let backend_names: Vec<&str> = cli_workers_config
+                .backends
+                .keys()
+                .map(|s| s.as_str())
+                .collect();
             properties.as_object_mut().unwrap().insert(
                 "backend".to_string(),
                 serde_json::json!({
@@ -190,8 +200,9 @@ impl Tool for SpawnWorkerTool {
 
         let worker_id = match worker_type {
             "opencode" => {
-                let directory = args.directory.as_deref()
-                    .ok_or_else(|| SpawnWorkerError("directory is required for opencode workers".into()))?;
+                let directory = args.directory.as_deref().ok_or_else(|| {
+                    SpawnWorkerError("directory is required for opencode workers".into())
+                })?;
 
                 spawn_opencode_worker_from_state(
                     &self.state,
@@ -203,10 +214,12 @@ impl Tool for SpawnWorkerTool {
                 .map_err(|e| SpawnWorkerError(format!("{e}")))?
             }
             "cli" => {
-                let backend = args.backend.as_deref()
-                    .ok_or_else(|| SpawnWorkerError("backend is required for cli workers".into()))?;
-                let directory = args.directory.as_deref()
-                    .ok_or_else(|| SpawnWorkerError("directory is required for cli workers".into()))?;
+                let backend = args.backend.as_deref().ok_or_else(|| {
+                    SpawnWorkerError("backend is required for cli workers".into())
+                })?;
+                let directory = args.directory.as_deref().ok_or_else(|| {
+                    SpawnWorkerError("directory is required for cli workers".into())
+                })?;
 
                 spawn_cli_worker_from_state(
                     &self.state,
@@ -218,16 +231,14 @@ impl Tool for SpawnWorkerTool {
                 .await
                 .map_err(|e| SpawnWorkerError(format!("{e}")))?
             }
-            _ => {
-                spawn_worker_from_state(
-                    &self.state,
-                    &args.task,
-                    args.interactive,
-                    args.skill.as_deref(),
-                )
-                .await
-                .map_err(|e| SpawnWorkerError(format!("{e}")))?
-            }
+            _ => spawn_worker_from_state(
+                &self.state,
+                &args.task,
+                args.interactive,
+                args.skill.as_deref(),
+            )
+            .await
+            .map_err(|e| SpawnWorkerError(format!("{e}")))?,
         };
 
         let worker_type_label = match worker_type {
