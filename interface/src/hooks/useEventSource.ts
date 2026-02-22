@@ -31,8 +31,8 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 
 	const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
 
-	const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>();
-	const eventSourceRef = useRef<EventSource>();
+	const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
+	const eventSourceRef = useRef<EventSource>(undefined);
 	const retryDelayRef = useRef(INITIAL_RETRY_MS);
 	const hadConnectionRef = useRef(false);
 

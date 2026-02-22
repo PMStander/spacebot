@@ -2,8 +2,26 @@ import { useMemo, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
+import {
+	DndContext,
+	closestCenter,
+	KeyboardSensor,
+	PointerSensor,
+	useSensor,
+	useSensors,
+	type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+	arrayMove,
+	SortableContext,
+	sortableKeyboardCoordinates,
+	useSortable,
+	verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { api, BASE_PATH } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
+import { useAgentOrder } from "@/hooks/useAgentOrder";
 import { Button } from "@/ui";
 import { ArrowLeft01Icon, DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -13,6 +31,80 @@ interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
 	collapsed: boolean;
 	onToggle: () => void;
+}
+
+interface SortableAgentItemProps {
+	agentId: string;
+	activity?: { workers: number; branches: number };
+	isActive: boolean;
+	collapsed: boolean;
+}
+
+function SortableAgentItem({ agentId, activity, isActive, collapsed }: SortableAgentItemProps) {
+	const {
+		attributes,
+		listeners,
+		setNodeRef,
+		transform,
+		transition,
+		isDragging,
+	} = useSortable({ id: agentId });
+
+	const style = {
+		transform: CSS.Transform.toString(transform),
+		transition,
+		opacity: isDragging ? 0.5 : 1,
+		cursor: isDragging ? 'grabbing' : 'grab',
+	};
+
+	if (collapsed) {
+		return (
+			<div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+				<Link
+					to="/agents/$agentId"
+					params={{ agentId }}
+					className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium ${
+						isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
+					title={agentId}
+				>
+					{agentId.charAt(0).toUpperCase()}
+				</Link>
+			</div>
+		);
+	}
+
+	return (
+		<div ref={setNodeRef} style={style} className="mx-2" {...attributes} {...listeners}>
+			<Link
+				to="/agents/$agentId"
+				params={{ agentId }}
+				className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
+					isActive
+						? "bg-sidebar-selected text-sidebar-ink"
+						: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+				}`}
+				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
+			>
+				<span className="flex-1 truncate">{agentId}</span>
+				{activity && (activity.workers > 0 || activity.branches > 0) && (
+					<div className="flex items-center gap-1">
+						{activity.workers > 0 && (
+							<span className="rounded bg-amber-500/15 px-1 py-0.5 text-tiny text-amber-400">
+								{activity.workers}w
+							</span>
+						)}
+						{activity.branches > 0 && (
+							<span className="rounded bg-violet-500/15 px-1 py-0.5 text-tiny text-violet-400">
+								{activity.branches}b
+							</span>
+						)}
+					</div>
+				)}
+			</Link>
+		</div>
+	);
 }
 
 export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
@@ -30,6 +122,9 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 	const agents = agentsData?.agents ?? [];
 	const channels = channelsData?.channels ?? [];
+	
+	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
+	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
 
 	const matchRoute = useMatchRoute();
 	const isOverview = matchRoute({ to: "/" });
@@ -39,7 +134,8 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 	// Group agents by their group field, preserving order within groups.
 	// Groups appear in the order their first agent appears. Ungrouped agents come last.
-	const groupedAgents = useMemo(() => {
+	// NOTE: groupedAgents is computed but not yet used in the UI; kept for future use.
+	/* const groupedAgents = useMemo(() => {
 		const groups: { name: string | null; agents: typeof agents }[] = [];
 		const groupMap = new Map<string | null, typeof agents>();
 		const groupOrder: (string | null)[] = [];
@@ -61,7 +157,7 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 			groups.push({ name: null, agents: groupMap.get(null)! });
 		}
 		return groups;
-	}, [agents]);
+	}, [agents]); */
 
 	const agentActivity = useMemo(() => {
 		const byAgent: Record<string, { workers: number; branches: number }> = {};
@@ -74,6 +170,27 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 		}
 		return byAgent;
 	}, [channels, liveStates]);
+
+	const sensors = useSensors(
+		useSensor(PointerSensor, {
+			activationConstraint: {
+				delay: 150,
+				tolerance: 5,
+			},
+		}),
+		useSensor(KeyboardSensor, {
+			coordinateGetter: sortableKeyboardCoordinates,
+		})
+	);
+
+	const handleDragEnd = (event: DragEndEvent) => {
+		const { active, over } = event;
+		if (over && active.id !== over.id) {
+			const oldIndex = agentOrder.indexOf(active.id as string);
+			const newIndex = agentOrder.indexOf(over.id as string);
+			setAgentOrder(arrayMove(agentOrder, oldIndex, newIndex));
+		}
+	};
 
 	return (
 		<motion.nav
@@ -129,31 +246,32 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
 				</Link>
 				<div className="my-1 h-px w-5 bg-sidebar-line" />
-					{groupedAgents.map((group) => (
-						<div key={group.name ?? "__ungrouped"} className="flex flex-col items-center gap-1">
-							{group.name && (
-								<span className="mt-1 text-[9px] font-medium uppercase tracking-wider text-sidebar-inkFaint" title={group.name}>
-									{group.name.charAt(0).toUpperCase()}
-								</span>
-							)}
-							{group.agents.map((agent) => {
-								const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
-								return (
-									<Link
-										key={agent.id}
-										to="/agents/$agentId"
-										params={{ agentId: agent.id }}
-										className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium ${
-											isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-										}`}
-										title={agent.id}
-									>
-										{agent.id.charAt(0).toUpperCase()}
-									</Link>
-								);
-							})}
-						</div>
-					))}
+				<DndContext
+					sensors={sensors}
+					collisionDetection={closestCenter}
+					onDragEnd={handleDragEnd}
+				>
+					<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
+						{agentOrder.map((agentId) => {
+							const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
+							return (
+								<SortableAgentItem
+									key={agentId}
+									agentId={agentId}
+									isActive={isActive}
+									collapsed={true}
+								/>
+							);
+						})}
+					</SortableContext>
+				</DndContext>
+				<button
+					onClick={() => setCreateDialogOpen(true)}
+					className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
+					title="New Agent"
+				>
+					+
+				</button>
 				</div>
 			) : (
 				<>
@@ -193,48 +311,30 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 								</span>
 							</>
 						) : (
-							groupedAgents.map((group) => (
-								<div key={group.name ?? "__ungrouped"} className="mb-1">
-									<span className="px-3 pb-1 text-tiny font-medium uppercase tracking-wider text-sidebar-inkFaint">
-										{group.name ?? "Agents"}
-									</span>
+							<DndContext
+								sensors={sensors}
+								collisionDetection={closestCenter}
+								onDragEnd={handleDragEnd}
+							>
+								<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
 									<div className="flex flex-col gap-0.5">
-										{group.agents.map((agent) => {
-											const activity = agentActivity[agent.id];
-											const isActive = matchRoute({ to: "/agents/$agentId", params: { agentId: agent.id }, fuzzy: true });
+										{agentOrder.map((agentId) => {
+											const activity = agentActivity[agentId];
+											const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
 
 											return (
-												<Link
-													key={agent.id}
-													to="/agents/$agentId"
-													params={{ agentId: agent.id }}
-													className={`mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-														isActive
-															? "bg-sidebar-selected text-sidebar-ink"
-															: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-													}`}
-												>
-													<span className="flex-1 truncate">{agent.id}</span>
-													{activity && (activity.workers > 0 || activity.branches > 0) && (
-														<div className="flex items-center gap-1">
-															{activity.workers > 0 && (
-																<span className="rounded bg-amber-500/15 px-1 py-0.5 text-tiny text-amber-400">
-																	{activity.workers}w
-																</span>
-															)}
-															{activity.branches > 0 && (
-																<span className="rounded bg-violet-500/15 px-1 py-0.5 text-tiny text-violet-400">
-																	{activity.branches}b
-																</span>
-															)}
-														</div>
-													)}
-												</Link>
+												<SortableAgentItem
+													key={agentId}
+													agentId={agentId}
+													activity={activity}
+													isActive={isActive}
+													collapsed={false}
+												/>
 											);
 										})}
 									</div>
-								</div>
-							))
+								</SortableContext>
+							</DndContext>
 						)}
 						<Button
 							variant="outline"

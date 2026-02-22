@@ -26,8 +26,8 @@ function PluginCard({ plugin, agentId }: { plugin: PluginInfo; agentId: string }
 				</div>
 				{plugin.has_ui && (
 					<Link
-						to="/agents/$agentId/plugins/$pluginName"
-						params={{ agentId, pluginName: plugin.name }}
+						to={"/agents/$agentId/plugins/$pluginName" as string}
+						params={{ agentId, pluginName: plugin.name } as Record<string, string>}
 						className="flex items-center gap-1.5 rounded-md border border-app-line px-3 py-1.5 text-xs text-ink-dull transition-colors hover:border-accent hover:text-accent"
 					>
 						<FontAwesomeIcon icon={faExternalLinkAlt} className="text-[10px]" />

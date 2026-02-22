@@ -68,11 +68,13 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
+    let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
         llm_manager,
+        mcp_manager,
         cron_tool: None,
         runtime_config,
         event_tx,
@@ -131,7 +133,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let web_search_enabled = rc.brave_search_key.load().is_some();
     let opencode_enabled = rc.opencode.load().enabled;
     let worker_capabilities = prompt_engine
-        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
+        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, false, &[])
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
@@ -189,6 +191,7 @@ async fn dump_channel_context() {
         channel_store,
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
+        reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -321,6 +324,7 @@ async fn dump_worker_context() {
         deps.sqlite_pool.clone(),
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
+        vec![],
     );
 
     let tool_defs = worker_tool_server
@@ -402,6 +406,7 @@ async fn dump_all_contexts() {
         channel_store: channel_store.clone(),
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
+        reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
@@ -472,6 +477,7 @@ async fn dump_all_contexts() {
         deps.sqlite_pool.clone(),
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
+        vec![],
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

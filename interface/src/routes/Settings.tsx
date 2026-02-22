@@ -169,6 +169,14 @@ const PROVIDERS = [
 		defaultModel: "mistral-large-latest",
 	},
 	{
+		id: "gemini",
+		name: "Google Gemini",
+		description: "Google Gemini experimental and production models",
+		placeholder: "AIza...",
+		envVar: "GEMINI_API_KEY",
+		defaultModel: "gemini/gemini-2.5-flash",
+	},
+	{
 		id: "nvidia",
 		name: "NVIDIA NIM",
 		description: "NVIDIA-hosted models via NIM API",
@@ -363,7 +371,7 @@ export function Settings() {
 										name={provider.name}
 										description={provider.description}
 										configured={isConfigured(provider.id)}
-										defaultModel={provider.defaultModel}
+										defaultModel={"defaultModel" in provider ? provider.defaultModel : undefined}
 										onEdit={() => {
 											setEditingProvider(provider.id);
 											setKeyInput("");
@@ -1357,7 +1365,7 @@ interface ProviderCardProps {
 	name: string;
 	description: string;
 	configured: boolean;
-	defaultModel: string;
+	defaultModel?: string;
 	onEdit: () => void;
 	onRemove: () => void;
 	removing: boolean;

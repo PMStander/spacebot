@@ -78,6 +78,18 @@ static MODELS_CACHE: std::sync::LazyLock<
 
 const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// Models known to work with Spacebot's current voice transcription path
+/// (OpenAI-compatible `/v1/chat/completions` with `input_audio`).
+const KNOWN_VOICE_TRANSCRIPTION_MODELS: &[&str] = &[
+    "openrouter/google/gemini-2.0-flash-001",
+    "openrouter/google/gemini-2.5-flash",
+    "openrouter/google/gemini-2.5-flash-lite",
+    "openrouter/google/gemini-2.5-pro",
+    "openrouter/google/gemini-3-flash-preview",
+    "openrouter/google/gemini-3-pro-preview",
+    "openrouter/google/gemini-3.1-pro-preview",
+];
+
 /// Maps models.dev provider IDs to spacebot's internal provider IDs for
 /// providers with direct integrations.
 fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
@@ -87,12 +99,17 @@ fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
         "deepseek" => Some("deepseek"),
         "xai" => Some("xai"),
         "mistral" => Some("mistral"),
+        "gemini" | "google" => Some("gemini"),
         "groq" => Some("groq"),
         "togetherai" => Some("together"),
         "fireworks-ai" => Some("fireworks"),
         "zhipuai" => Some("zhipu"),
         _ => None,
     }
+}
+
+fn is_known_voice_transcription_model(model_id: &str) -> bool {
+    KNOWN_VOICE_TRANSCRIPTION_MODELS.contains(&model_id)
 }
 
 /// Models from providers not in models.dev (private/custom endpoints).
@@ -329,15 +346,14 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     };
 
     let has_key = |key: &str, env_var: &str| -> bool {
-        if let Some(llm) = doc.get("llm") {
-            if let Some(val) = llm.get(key) {
-                if let Some(s) = val.as_str() {
-                    if let Some(var_name) = s.strip_prefix("env:") {
-                        return std::env::var(var_name).is_ok();
-                    }
-                    return !s.is_empty();
-                }
+        if let Some(llm) = doc.get("llm")
+            && let Some(val) = llm.get(key)
+            && let Some(s) = val.as_str()
+        {
+            if let Some(var_name) = s.strip_prefix("env:") {
+                return std::env::var(var_name).is_ok();
             }
+            return !s.is_empty();
         }
         std::env::var(env_var).is_ok()
     };
@@ -371,6 +387,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("mistral_key", "MISTRAL_API_KEY") {
         providers.push("mistral");
+    }
+    if has_key("gemini_key", "GEMINI_API_KEY") {
+        providers.push("gemini");
     }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
@@ -422,6 +441,9 @@ pub(super) async fn get_models(
             if let Some(capability) = requested_capability {
                 return match capability {
                     "input_audio" => model.input_audio,
+                    "voice_transcription" => {
+                        model.input_audio && is_known_voice_transcription_model(&model.id)
+                    }
                     _ => true,
                 };
             }
@@ -433,6 +455,11 @@ pub(super) async fn get_models(
     for model in extra_models() {
         if let Some(capability) = requested_capability {
             if capability == "input_audio" && !model.input_audio {
+                continue;
+            }
+            if capability == "voice_transcription"
+                && (!model.input_audio || !is_known_voice_transcription_model(&model.id))
+            {
                 continue;
             }
         }

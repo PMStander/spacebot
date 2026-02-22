@@ -60,6 +60,7 @@ pub struct ApiConfig {
     pub port: u16,
     /// Address to bind the HTTP server on.
     pub bind: String,
+    pub auth_token: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -68,6 +69,7 @@ impl Default for ApiConfig {
             enabled: true,
             port: 19898,
             bind: "127.0.0.1".into(),
+            auth_token: None,
         }
     }
 }
@@ -102,6 +104,8 @@ pub enum ApiType {
     OpenAiResponses,
     /// Anthropic Messages API (https://api.anthropic.com/v1/messages)
     Anthropic,
+    /// Google Gemini API (https://generativelanguage.googleapis.com/v1beta/openai/chat/completions)
+    Gemini,
 }
 
 impl<'de> serde::Deserialize<'de> for ApiType {
@@ -113,9 +117,10 @@ impl<'de> serde::Deserialize<'de> for ApiType {
             "openai_completions" => Ok(Self::OpenAiCompletions),
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
+            "gemini" => Ok(Self::Gemini),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_responses\", or \"anthropic\"",
+                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", or \"gemini\"",
             )),
         }
     }
@@ -144,13 +149,13 @@ pub struct LlmConfig {
     pub deepseek_key: Option<String>,
     pub xai_key: Option<String>,
     pub mistral_key: Option<String>,
+    pub gemini_key: Option<String>,
     pub ollama_key: Option<String>,
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub moonshot_key: Option<String>,
-    pub gemini_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
@@ -169,6 +174,7 @@ impl LlmConfig {
             || self.deepseek_key.is_some()
             || self.xai_key.is_some()
             || self.mistral_key.is_some()
+            || self.gemini_key.is_some()
             || self.ollama_key.is_some()
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
@@ -176,7 +182,6 @@ impl LlmConfig {
             || self.minimax_key.is_some()
             || self.moonshot_key.is_some()
             || self.zai_coding_plan_key.is_some()
-            || self.gemini_key.is_some()
             || !self.providers.is_empty()
     }
 }
@@ -186,10 +191,11 @@ const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
-const GEMINI_PROVIDER_BASE_URL: &str = "https://generativelanguage.googleapis.com";
-
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
+pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Debug, Clone)]
@@ -206,6 +212,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
     pub history_backfill_count: usize,
@@ -215,6 +222,37 @@ pub struct DefaultsConfig {
     pub cli_workers: crate::cli_worker::CliWorkersConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
+}
+
+/// MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransport,
+    pub enabled: bool,
+}
+
+/// MCP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        headers: HashMap<String, String>,
+    },
+}
+
+impl McpTransport {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            McpTransport::Stdio { .. } => "stdio",
+            McpTransport::Http { .. } => "http",
+        }
+    }
 }
 
 /// Compaction threshold configuration.
@@ -438,6 +476,7 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub browser: Option<BrowserConfig>,
+    pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
     /// Cron job definitions for this agent.
@@ -477,6 +516,7 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
@@ -498,6 +538,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             browser: BrowserConfig::default(),
+            mcp: Vec::new(),
             brave_search_key: None,
             history_backfill_count: 50,
             cron: Vec::new(),
@@ -546,6 +587,7 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key
                 .clone()
@@ -603,6 +645,8 @@ pub struct Binding {
     pub chat_id: Option<String>,
     /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
+    /// Require explicit @mention (or reply-to-bot) for inbound messages.
+    pub require_mention: bool,
     /// User IDs allowed to DM the bot through this binding.
     pub dm_allowed_users: Vec<String>,
 }
@@ -614,9 +658,16 @@ impl Binding {
             return false;
         }
 
+        // For webchat messages, match based on agent_id in the message
+        if message.source == "webchat"
+            && let Some(message_agent_id) = &message.agent_id
+        {
+            return message_agent_id.as_ref() == self.agent_id;
+        }
+
         // DM messages have no guild_id — match if the sender is in dm_allowed_users
         let is_dm =
-            message.metadata.get("discord_guild_id").is_none() && message.source == "discord";
+            !message.metadata.contains_key("discord_guild_id") && message.source == "discord";
         if is_dm {
             return !self.dm_allowed_users.is_empty()
                 && self.dm_allowed_users.contains(&message.sender_id);
@@ -676,6 +727,24 @@ impl Binding {
 
             if !direct_match && !parent_match {
                 return false;
+            }
+        }
+
+        if self.channel == "discord" && self.require_mention {
+            let is_guild_message = message
+                .metadata
+                .get("discord_guild_id")
+                .and_then(|v| v.as_u64())
+                .is_some();
+            if is_guild_message {
+                let mentions_or_replies_to_bot = message
+                    .metadata
+                    .get("discord_mentions_or_replies_to_bot")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !mentions_or_replies_to_bot {
+                    return false;
+                }
             }
         }
 
@@ -766,10 +835,6 @@ pub struct SlackConfig {
 pub struct DiscordPermissions {
     pub guild_filter: Option<Vec<u64>>,
     pub channel_filter: std::collections::HashMap<u64, Vec<u64>>,
-    /// Guilds where a bot mention (or reply-to-bot) is required before routing.
-    pub mention_required_guilds: Vec<u64>,
-    /// Per-guild channels where mention is required before routing.
-    pub mention_required_channels: std::collections::HashMap<u64, Vec<u64>>,
     pub dm_allowed_users: Vec<u64>,
     pub allow_bot_messages: bool,
 }
@@ -806,13 +871,13 @@ impl SlackPermissions {
             let mut filter: std::collections::HashMap<String, Vec<String>> =
                 std::collections::HashMap::new();
             for binding in &slack_bindings {
-                if let Some(workspace_id) = &binding.workspace_id {
-                    if !binding.channel_ids.is_empty() {
-                        filter
-                            .entry(workspace_id.clone())
-                            .or_default()
-                            .extend(binding.channel_ids.clone());
-                    }
+                if let Some(workspace_id) = &binding.workspace_id
+                    && !binding.channel_ids.is_empty()
+                {
+                    filter
+                        .entry(workspace_id.clone())
+                        .or_default()
+                        .extend(binding.channel_ids.clone());
                 }
             }
             filter
@@ -854,15 +919,14 @@ impl DiscordPermissions {
                     .guild_id
                     .as_ref()
                     .and_then(|g| g.parse::<u64>().ok())
+                    && !binding.channel_ids.is_empty()
                 {
-                    if !binding.channel_ids.is_empty() {
-                        let channel_ids: Vec<u64> = binding
-                            .channel_ids
-                            .iter()
-                            .filter_map(|id| id.parse::<u64>().ok())
-                            .collect();
-                        filter.entry(guild_id).or_default().extend(channel_ids);
-                    }
+                    let channel_ids: Vec<u64> = binding
+                        .channel_ids
+                        .iter()
+                        .filter_map(|id| id.parse::<u64>().ok())
+                        .collect();
+                    filter.entry(guild_id).or_default().extend(channel_ids);
                 }
             }
             filter
@@ -877,10 +941,10 @@ impl DiscordPermissions {
         // Also collect dm_allowed_users from bindings
         for binding in &discord_bindings {
             for id in &binding.dm_allowed_users {
-                if let Ok(uid) = id.parse::<u64>() {
-                    if !dm_allowed_users.contains(&uid) {
-                        dm_allowed_users.push(uid);
-                    }
+                if let Ok(uid) = id.parse::<u64>()
+                    && !dm_allowed_users.contains(&uid)
+                {
+                    dm_allowed_users.push(uid);
                 }
             }
         }
@@ -888,8 +952,6 @@ impl DiscordPermissions {
         Self {
             guild_filter,
             channel_filter,
-            mention_required_guilds: Vec::new(),
-            mention_required_channels: std::collections::HashMap::new(),
             dm_allowed_users,
             allow_bot_messages: discord.allow_bot_messages,
         }
@@ -943,10 +1005,10 @@ impl TelegramPermissions {
 
         for binding in &telegram_bindings {
             for id in &binding.dm_allowed_users {
-                if let Ok(uid) = id.parse::<i64>() {
-                    if !dm_allowed_users.contains(&uid) {
-                        dm_allowed_users.push(uid);
-                    }
+                if let Ok(uid) = id.parse::<i64>()
+                    && !dm_allowed_users.contains(&uid)
+                {
+                    dm_allowed_users.push(uid);
                 }
             }
         }
@@ -1019,6 +1081,7 @@ pub struct WebhookConfig {
     pub enabled: bool,
     pub port: u16,
     pub bind: String,
+    pub auth_token: Option<String>,
 }
 
 // -- TOML deserialization types --
@@ -1059,6 +1122,8 @@ struct TomlApiConfig {
     port: u16,
     #[serde(default = "default_api_bind")]
     bind: String,
+    #[serde(default)]
+    auth_token: Option<String>,
 }
 
 impl Default for TomlApiConfig {
@@ -1067,6 +1132,7 @@ impl Default for TomlApiConfig {
             enabled: default_api_enabled(),
             port: default_api_port(),
             bind: default_api_bind(),
+            auth_token: None,
         }
     }
 }
@@ -1079,6 +1145,13 @@ fn default_api_port() -> u16 {
 }
 fn default_api_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn hosted_api_bind(bind: String) -> String {
+    match std::env::var("SPACEBOT_DEPLOYMENT") {
+        Ok(deployment) if deployment.eq_ignore_ascii_case("hosted") => "[::]".into(),
+        _ => bind,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1129,6 +1202,7 @@ struct TomlLlmConfigFields {
     deepseek_key: Option<String>,
     xai_key: Option<String>,
     mistral_key: Option<String>,
+    gemini_key: Option<String>,
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
@@ -1136,7 +1210,6 @@ struct TomlLlmConfigFields {
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
-    gemini_key: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -1157,6 +1230,7 @@ struct TomlLlmConfig {
     deepseek_key: Option<String>,
     xai_key: Option<String>,
     mistral_key: Option<String>,
+    gemini_key: Option<String>,
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
@@ -1164,7 +1238,6 @@ struct TomlLlmConfig {
     minimax_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
-    gemini_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -1210,6 +1283,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             deepseek_key: fields.deepseek_key,
             xai_key: fields.xai_key,
             mistral_key: fields.mistral_key,
+            gemini_key: fields.gemini_key,
             ollama_key: fields.ollama_key,
             ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
@@ -1217,7 +1291,6 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             minimax_key: fields.minimax_key,
             moonshot_key: fields.moonshot_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
-            gemini_key: fields.gemini_key,
 
             providers: fields.providers,
         })
@@ -1238,6 +1311,8 @@ struct TomlDefaultsConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    #[serde(default)]
+    mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     cli_workers: Option<TomlCliWorkersConfig>,
@@ -1348,6 +1423,26 @@ struct TomlOpenCodePermissions {
     webfetch: Option<String>,
 }
 
+#[derive(Deserialize, Clone)]
+struct TomlMcpServerConfig {
+    name: String,
+    transport: String,
+    #[serde(default = "default_mcp_enabled")]
+    enabled: bool,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 struct TomlAgentConfig {
     id: String,
@@ -1367,6 +1462,7 @@ struct TomlAgentConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -1444,6 +1540,7 @@ struct TomlWebhookConfig {
     port: u16,
     #[serde(default = "default_webhook_bind")]
     bind: String,
+    auth_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1473,6 +1570,8 @@ struct TomlBinding {
     chat_id: Option<String>,
     #[serde(default)]
     channel_ids: Vec<String>,
+    #[serde(default)]
+    require_mention: bool,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
 }
@@ -1510,7 +1609,7 @@ fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> 
         let key = key.trim();
         let value = value.trim();
         if key.is_empty() {
-            return Err(ConfigError::Invalid(
+            Err(ConfigError::Invalid(
                 "invalid OTEL_EXPORTER_OTLP_HEADERS entry: empty header name".into(),
             ))?;
         }
@@ -1518,6 +1617,53 @@ fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> 
     }
 
     Ok(headers)
+}
+
+fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> {
+    if raw.name.trim().is_empty() {
+        return Err(ConfigError::Invalid("mcp server name cannot be empty".into()).into());
+    }
+
+    let transport = match raw.transport.as_str() {
+        "stdio" => {
+            let command = raw.command.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with stdio transport requires 'command'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Stdio {
+                command,
+                args: raw.args,
+                env: raw.env,
+            }
+        }
+        "http" => {
+            let url = raw.url.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with http transport requires 'url'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Http {
+                url,
+                headers: raw.headers,
+            }
+        }
+        other => {
+            return Err(ConfigError::Invalid(format!(
+                "mcp server '{}' has invalid transport '{}', expected 'stdio' or 'http'",
+                raw.name, other
+            ))
+            .into());
+        }
+    };
+
+    Ok(McpServerConfig {
+        name: raw.name,
+        transport,
+        enabled: raw.enabled,
+    })
 }
 
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
@@ -1547,6 +1693,28 @@ fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> Rou
     }
 }
 
+fn resolve_mcp_configs(
+    default_configs: &[McpServerConfig],
+    agent_configs: Option<&[McpServerConfig]>,
+) -> Vec<McpServerConfig> {
+    let mut merged = default_configs.to_vec();
+
+    if let Some(agent_configs) = agent_configs {
+        for agent_config in agent_configs {
+            if let Some(existing_index) = merged
+                .iter()
+                .position(|existing| existing.name == agent_config.name)
+            {
+                merged[existing_index] = agent_config.clone();
+            } else {
+                merged.push(agent_config.clone());
+            }
+        }
+    }
+
+    merged
+}
+
 impl Config {
     /// Resolve the instance directory from env or default (~/.spacebot).
     pub fn default_instance_dir() -> PathBuf {
@@ -1564,6 +1732,11 @@ impl Config {
         let instance_dir = Self::default_instance_dir();
         let config_path = instance_dir.join("config.toml");
         if config_path.exists() {
+            return false;
+        }
+
+        // OAuth credentials count as configured
+        if crate::auth::credentials_path(&instance_dir).exists() {
             return false;
         }
 
@@ -1651,6 +1824,7 @@ impl Config {
             deepseek_key: std::env::var("DEEPSEEK_API_KEY").ok(),
             xai_key: std::env::var("XAI_API_KEY").ok(),
             mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
+            gemini_key: std::env::var("GEMINI_API_KEY").ok(),
             ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
@@ -1658,7 +1832,6 @@ impl Config {
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
-            gemini_key: std::env::var("GEMINI_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
@@ -1762,6 +1935,17 @@ impl Config {
                 });
         }
 
+        if let Some(gemini_key) = llm.gemini_key.clone() {
+            llm.providers
+                .entry("gemini".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Gemini,
+                    base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+                    api_key: gemini_key,
+                    name: None,
+                });
+        }
+
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
@@ -1794,6 +1978,7 @@ impl Config {
             ingestion: None,
             cortex: None,
             browser: None,
+            mcp: None,
             brave_search_key: None,
             cron: Vec::new(),
         }];
@@ -1924,6 +2109,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MISTRAL_API_KEY").ok()),
+            gemini_key: toml
+                .llm
+                .gemini_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GEMINI_API_KEY").ok()),
             ollama_key: toml
                 .llm
                 .ollama_key
@@ -1966,12 +2157,6 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
-            gemini_key: toml
-                .llm
-                .gemini_key
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GEMINI_API_KEY").ok()),
             providers: toml
                 .llm
                 .providers
@@ -2091,6 +2276,13 @@ impl Config {
         }
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
+
+        let default_mcp = toml
+            .defaults
+            .mcp
+            .into_iter()
+            .map(parse_mcp_server_config)
+            .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
@@ -2221,6 +2413,7 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.browser.clone()),
+            mcp: default_mcp,
             brave_search_key: toml
                 .defaults
                 .brave_search_key
@@ -2304,7 +2497,7 @@ impl Config {
         let mut agents: Vec<AgentConfig> = toml
             .agents
             .into_iter()
-            .map(|a| {
+            .map(|a| -> Result<AgentConfig> {
                 // Per-agent routing resolves against instance defaults
                 let agent_routing = a
                     .routing
@@ -2326,7 +2519,7 @@ impl Config {
                     })
                     .collect();
 
-                AgentConfig {
+                Ok(AgentConfig {
                     id: a.id,
                     default: a.default,
                     group: a.group,
@@ -2419,11 +2612,20 @@ impl Config {
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
                     }),
+                    mcp: match a.mcp {
+                        Some(mcp_servers) => Some(
+                            mcp_servers
+                                .into_iter()
+                                .map(parse_mcp_server_config)
+                                .collect::<Result<Vec<_>>>()?,
+                        ),
+                        None => None,
+                    },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         if agents.is_empty() {
             agents.push(AgentConfig {
@@ -2443,15 +2645,16 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 browser: None,
+                mcp: None,
                 brave_search_key: None,
                 cron: Vec::new(),
             });
         }
 
-        if !agents.iter().any(|a| a.default) {
-            if let Some(first) = agents.first_mut() {
-                first.default = true;
-            }
+        if !agents.iter().any(|a| a.default)
+            && let Some(first) = agents.first_mut()
+        {
+            first.default = true;
         }
 
         let messaging = MessagingConfig {
@@ -2511,6 +2714,7 @@ impl Config {
                 enabled: w.enabled,
                 port: w.port,
                 bind: w.bind,
+                auth_token: w.auth_token.as_deref().and_then(resolve_env_value),
             }),
             twitch: toml.messaging.twitch.and_then(|t| {
                 let username = t
@@ -2543,6 +2747,7 @@ impl Config {
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
                 channel_ids: b.channel_ids,
+                require_mention: b.require_mention,
                 dm_allowed_users: b.dm_allowed_users,
             })
             .collect();
@@ -2550,7 +2755,8 @@ impl Config {
         let api = ApiConfig {
             enabled: toml.api.enabled,
             port: toml.api.port,
-            bind: toml.api.bind,
+            bind: hosted_api_bind(toml.api.bind),
+            auth_token: toml.api.auth_token.as_deref().and_then(resolve_env_value),
         };
 
         let metrics = MetricsConfig {
@@ -2639,6 +2845,7 @@ pub struct RuntimeConfig {
     pub max_concurrent_branches: ArcSwap<usize>,
     pub max_concurrent_workers: ArcSwap<usize>,
     pub browser_config: ArcSwap<BrowserConfig>,
+    pub mcp: ArcSwap<Vec<McpServerConfig>>,
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
@@ -2691,6 +2898,7 @@ impl RuntimeConfig {
             max_concurrent_branches: ArcSwap::from_pointee(agent_config.max_concurrent_branches),
             max_concurrent_workers: ArcSwap::from_pointee(agent_config.max_concurrent_workers),
             browser_config: ArcSwap::from_pointee(agent_config.browser.clone()),
+            mcp: ArcSwap::from_pointee(agent_config.mcp.clone()),
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
@@ -2728,7 +2936,12 @@ impl RuntimeConfig {
     /// swaps all reloadable fields. Does not handle API keys (those are
     /// reloaded via LlmManager), DB paths, messaging adapters, or agent
     /// topology.
-    pub fn reload_config(&self, config: &Config, agent_id: &str) {
+    pub async fn reload_config(
+        &self,
+        config: &Config,
+        agent_id: &str,
+        mcp_manager: &crate::mcp::McpManager,
+    ) {
         let agent = config.agents.iter().find(|a| a.id == agent_id);
         let Some(agent) = agent else {
             tracing::warn!(agent_id, "agent not found in reloaded config, skipping");
@@ -2736,6 +2949,8 @@ impl RuntimeConfig {
         };
 
         let resolved = agent.resolve(&config.instance_dir, &config.defaults);
+        let old_mcp = (**self.mcp.load()).clone();
+        let new_mcp = resolved.mcp.clone();
 
         self.routing.store(Arc::new(resolved.routing));
         self.compaction.store(Arc::new(resolved.compaction));
@@ -2752,11 +2967,14 @@ impl RuntimeConfig {
         self.max_concurrent_workers
             .store(Arc::new(resolved.max_concurrent_workers));
         self.browser_config.store(Arc::new(resolved.browser));
+        self.mcp.store(Arc::new(new_mcp.clone()));
         self.history_backfill_count
             .store(Arc::new(resolved.history_backfill_count));
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cortex.store(Arc::new(resolved.cortex));
+
+        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
         tracing::info!(agent_id, "runtime config reloaded");
     }
@@ -2786,10 +3004,16 @@ impl std::fmt::Debug for RuntimeConfig {
 /// Returns a JoinHandle that runs until dropped. File events are debounced
 /// to 2 seconds so rapid edits (e.g. :w in vim hitting multiple writes) are
 /// collapsed into a single reload.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     instance_dir: PathBuf,
-    agents: Vec<(String, PathBuf, Arc<RuntimeConfig>)>,
+    agents: Vec<(
+        String,
+        PathBuf,
+        Arc<RuntimeConfig>,
+        Arc<crate::mcp::McpManager>,
+    )>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
@@ -2838,20 +3062,20 @@ pub fn spawn_file_watcher(
 
         // Watch instance-level skills directory
         let instance_skills_dir = instance_dir.join("skills");
-        if instance_skills_dir.is_dir() {
-            if let Err(error) = watcher.watch(&instance_skills_dir, RecursiveMode::Recursive) {
-                tracing::warn!(%error, path = %instance_skills_dir.display(), "failed to watch instance skills dir");
-            }
+        if instance_skills_dir.is_dir()
+            && let Err(error) = watcher.watch(&instance_skills_dir, RecursiveMode::Recursive)
+        {
+            tracing::warn!(%error, path = %instance_skills_dir.display(), "failed to watch instance skills dir");
         }
 
         // Watch per-agent workspace directories (skills, identity)
-        for (_, workspace, _) in &agents {
-            for subdir in &["skills"] {
-                let path = workspace.join(subdir);
-                if path.is_dir() {
-                    if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
-                        tracing::warn!(%error, path = %path.display(), "failed to watch agent dir");
-                    }
+        for (_, workspace, _, _) in &agents {
+            {
+                let path = workspace.join("skills");
+                if path.is_dir()
+                    && let Err(error) = watcher.watch(&path, RecursiveMode::Recursive)
+                {
+                    tracing::warn!(%error, path = %path.display(), "failed to watch agent dir");
                 }
             }
             // Identity files are in the workspace root
@@ -2875,13 +3099,7 @@ pub fn spawn_file_watcher(
         // Debounce loop: collect events for 2 seconds, then reload
         let debounce = Duration::from_secs(2);
 
-        loop {
-            // Block until the first event arrives
-            let first = match rx.recv() {
-                Ok(event) => event,
-                Err(_) => break,
-            };
-
+        while let Ok(first) = rx.recv() {
             // Drain any additional events within the debounce window
             let mut changed_paths: Vec<PathBuf> = first.paths;
             while let Ok(event) = rx.recv_timeout(debounce) {
@@ -2958,40 +3176,38 @@ pub fn spawn_file_watcher(
                 bindings.store(Arc::new(config.bindings.clone()));
                 tracing::info!("bindings reloaded ({} entries)", config.bindings.len());
 
-                if let Some(ref perms) = discord_permissions {
-                    if let Some(discord_config) = &config.messaging.discord {
-                        let new_perms =
-                            DiscordPermissions::from_config(discord_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("discord permissions reloaded");
-                    }
+                if let Some(ref perms) = discord_permissions
+                    && let Some(discord_config) = &config.messaging.discord
+                {
+                    let new_perms =
+                        DiscordPermissions::from_config(discord_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("discord permissions reloaded");
                 }
 
-                if let Some(ref perms) = slack_permissions {
-                    if let Some(slack_config) = &config.messaging.slack {
-                        let new_perms =
-                            SlackPermissions::from_config(slack_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("slack permissions reloaded");
-                    }
+                if let Some(ref perms) = slack_permissions
+                    && let Some(slack_config) = &config.messaging.slack
+                {
+                    let new_perms = SlackPermissions::from_config(slack_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("slack permissions reloaded");
                 }
 
-                if let Some(ref perms) = telegram_permissions {
-                    if let Some(telegram_config) = &config.messaging.telegram {
-                        let new_perms =
-                            TelegramPermissions::from_config(telegram_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("telegram permissions reloaded");
-                    }
+                if let Some(ref perms) = telegram_permissions
+                    && let Some(telegram_config) = &config.messaging.telegram
+                {
+                    let new_perms =
+                        TelegramPermissions::from_config(telegram_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("telegram permissions reloaded");
                 }
 
-                if let Some(ref perms) = twitch_permissions {
-                    if let Some(twitch_config) = &config.messaging.twitch {
-                        let new_perms =
-                            TwitchPermissions::from_config(twitch_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("twitch permissions reloaded");
-                    }
+                if let Some(ref perms) = twitch_permissions
+                    && let Some(twitch_config) = &config.messaging.twitch
+                {
+                    let new_perms = TwitchPermissions::from_config(twitch_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("twitch permissions reloaded");
                 }
 
                 // Hot-start adapters that are newly enabled in the config
@@ -3006,8 +3222,8 @@ pub fn spawn_file_watcher(
 
                     rt.spawn(async move {
                         // Discord: start if enabled and not already running
-                        if let Some(discord_config) = &config.messaging.discord {
-                            if discord_config.enabled && !manager.has_adapter("discord").await {
+                        if let Some(discord_config) = &config.messaging.discord
+                            && discord_config.enabled && !manager.has_adapter("discord").await {
                                 let perms = match discord_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3023,11 +3239,10 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start discord adapter from config change");
                                 }
                             }
-                        }
 
                         // Slack: start if enabled and not already running
-                        if let Some(slack_config) = &config.messaging.slack {
-                            if slack_config.enabled && !manager.has_adapter("slack").await {
+                        if let Some(slack_config) = &config.messaging.slack
+                            && slack_config.enabled && !manager.has_adapter("slack").await {
                                 let perms = match slack_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3051,11 +3266,10 @@ pub fn spawn_file_watcher(
                                     }
                                 }
                             }
-                        }
 
                         // Telegram: start if enabled and not already running
-                        if let Some(telegram_config) = &config.messaging.telegram {
-                            if telegram_config.enabled && !manager.has_adapter("telegram").await {
+                        if let Some(telegram_config) = &config.messaging.telegram
+                            && telegram_config.enabled && !manager.has_adapter("telegram").await {
                                 let perms = match telegram_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3071,11 +3285,10 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start telegram adapter from config change");
                                 }
                             }
-                        }
 
                         // Twitch: start if enabled and not already running
-                        if let Some(twitch_config) = &config.messaging.twitch {
-                            if twitch_config.enabled && !manager.has_adapter("twitch").await {
+                        if let Some(twitch_config) = &config.messaging.twitch
+                            && twitch_config.enabled && !manager.has_adapter("twitch").await {
                                 let perms = match twitch_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3094,15 +3307,15 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start twitch adapter from config change");
                                 }
                             }
-                        }
                     });
                 }
             }
 
             // Apply reloads to each agent's RuntimeConfig
-            for (agent_id, workspace, runtime_config) in &agents {
+            for (agent_id, workspace, runtime_config, mcp_manager) in &agents {
                 if let Some(config) = &new_config {
-                    runtime_config.reload_config(config, agent_id);
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(runtime_config.reload_config(config, agent_id, mcp_manager));
                 }
 
                 if identity_changed {
@@ -3193,11 +3406,12 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         7 => ("DeepSeek API key", "deepseek_key", "deepseek"),
         8 => ("xAI API key", "xai_key", "xai"),
         9 => ("Mistral API key", "mistral_key", "mistral"),
-        10 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
-        11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
-        12 => ("MiniMax API key", "minimax_key", "minimax"),
-        13 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        14 => (
+        10 => ("Google Gemini API key", "gemini_key", "gemini"),
+        11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
+        12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        13 => ("MiniMax API key", "minimax_key", "minimax"),
+        14 => ("Moonshot API key", "moonshot_key", "moonshot"),
+        15 => (
             "Z.AI Coding Plan API key",
             "zai_coding_plan_key",
             "zai-coding-plan",
@@ -3405,11 +3619,26 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 4] = [
+            const KEYS: [&str; 19] = [
                 "SPACEBOT_DIR",
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
+                "ZHIPU_API_KEY",
+                "GROQ_API_KEY",
+                "TOGETHER_API_KEY",
+                "FIREWORKS_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "XAI_API_KEY",
+                "MISTRAL_API_KEY",
+                "GEMINI_API_KEY",
+                "NVIDIA_API_KEY",
+                "OLLAMA_API_KEY",
+                "OLLAMA_BASE_URL",
+                "OPENCODE_ZEN_API_KEY",
+                "MINIMAX_API_KEY",
+                "MOONSHOT_API_KEY",
+                "ZAI_CODING_PLAN_API_KEY",
             ];
 
             let vars = KEYS
@@ -3531,6 +3760,9 @@ api_key = "sk-proj-xyz789"
 
     #[test]
     fn test_llm_provider_tables_parse_with_env_and_lowercase_keys() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::new();
+
         let toml = r#"
 [llm.provider.MyProv]
 api_type = "openai_responses"
@@ -3660,6 +3892,25 @@ name = "Custom OpenAI"
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "test-key");
         }
+
+        assert!(!Config::needs_onboarding());
+    }
+
+    #[test]
+    fn test_needs_onboarding_false_with_oauth_credentials() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        // Create an OAuth credentials file in the EnvGuard's temp dir
+        let instance_dir = Config::default_instance_dir();
+        let creds = crate::auth::OAuthCredentials {
+            access_token: "sk-ant-oat01-test".to_string(),
+            refresh_token: "sk-ant-ort01-test".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        };
+        crate::auth::save_credentials(&instance_dir, &creds).expect("failed to save credentials");
 
         assert!(!Config::needs_onboarding());
     }

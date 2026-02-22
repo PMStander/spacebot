@@ -55,12 +55,11 @@ impl RoutingConfig {
     /// Resolve the model name for a process type and optional task type.
     pub fn resolve(&self, process_type: ProcessType, task_type: Option<&str>) -> &str {
         // Check task-type override first (only for workers and branches)
-        if let Some(task) = task_type {
-            if matches!(process_type, ProcessType::Worker | ProcessType::Branch) {
-                if let Some(override_model) = self.task_overrides.get(task) {
-                    return override_model;
-                }
-            }
+        if let Some(task) = task_type
+            && matches!(process_type, ProcessType::Worker | ProcessType::Branch)
+            && let Some(override_model) = self.task_overrides.get(task)
+        {
+            return override_model;
         }
 
         match process_type {
@@ -283,6 +282,21 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
+        "gemini" => {
+            let channel: String = "gemini/gemini-2.5-flash".into();
+            let worker: String = "gemini/gemini-2.5-flash".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
         "opencode-zen" => {
             let channel: String = "opencode-zen/kimi-k2.5".into();
             let worker: String = "opencode-zen/kimi-k2.5".into();
@@ -299,25 +313,6 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
-        "openai" => RoutingConfig::for_model("openai/gpt-4.1".into()),
-        "zhipu" => RoutingConfig::for_model("zhipu/glm-4-plus".into()),
-        "zhipu-sub" => RoutingConfig::for_model("zhipu-sub/glm-5".into()),
-        "groq" => RoutingConfig::for_model("groq/llama-3.3-70b-versatile".into()),
-        "together" => RoutingConfig::for_model(
-            "together/meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo".into(),
-        ),
-        "fireworks" => RoutingConfig::for_model(
-            "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct".into(),
-        ),
-        "deepseek" => RoutingConfig::for_model("deepseek/deepseek-chat".into()),
-        "xai" => RoutingConfig::for_model("xai/grok-2-latest".into()),
-        "mistral" => RoutingConfig::for_model("mistral/mistral-large-latest".into()),
-        "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
-        "opencode-zen" => RoutingConfig::for_model("opencode-zen/kimi-k2.5".into()),
-        "minimax" => RoutingConfig::for_model("minimax/MiniMax-M1-80k".into()),
-        "moonshot" => RoutingConfig::for_model("moonshot/kimi-k2.5".into()),
-        "zai-coding-plan" => RoutingConfig::for_model("zai-coding-plan/glm-5".into()),
-        "gemini" => RoutingConfig::for_model("gemini/gemini-2.0-flash".into()),
         _ => RoutingConfig::default(),
     }
 }
@@ -336,12 +331,12 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "deepseek" => "deepseek/",
         "xai" => "xai/",
         "mistral" => "mistral/",
+        "gemini" => "gemini/",
         "nvidia" => "nvidia/",
         "opencode-zen" => "opencode-zen/",
         "minimax" => "minimax/",
         "moonshot" => "moonshot/",
         "zai-coding-plan" => "zai-coding-plan/",
-        "gemini" => "gemini/",
         _ => "",
     }
 }

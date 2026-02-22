@@ -558,6 +558,8 @@ export interface RoutingSection {
 	worker_thinking_effort: string;
 	compactor_thinking_effort: string;
 	cortex_thinking_effort: string;
+	task_overrides?: Record<string, string>;
+	fallbacks?: Record<string, string[]>;
 }
 
 export interface TuningSection {
@@ -799,6 +801,23 @@ export interface ModelInfo {
 
 export interface ModelsResponse {
 	models: ModelInfo[];
+}
+
+// -- Plugin Types --
+
+export interface PluginInfo {
+	name: string;
+	description: string;
+	version: string;
+	source: string;
+	has_ui: boolean;
+	has_api: boolean;
+	tool_count: number;
+	base_dir: string;
+}
+
+export interface PluginsResponse {
+	plugins: PluginInfo[];
 }
 
 // -- Ingest Types --
@@ -1319,7 +1338,7 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<ProvidersResponse>("/providers"),
-	updateProvider: async (provider: string, apiKey: string, model: string) => {
+	updateProvider: async (provider: string, apiKey: string, model?: string) => {
 		const response = await fetch(`${API_BASE}/providers`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
@@ -1352,7 +1371,7 @@ export const api = {
 	},
 
 	// Model listing
-	models: (provider?: string, capability?: string) => {
+	models: (provider?: string, capability?: "input_audio" | "voice_transcription") => {
 		const params = new URLSearchParams();
 		if (provider) params.set("provider", provider);
 		if (capability) params.set("capability", capability);
@@ -1645,4 +1664,11 @@ export const api = {
 	// Canvas API
 	canvasPanels: (agentId: string) =>
 		fetchJson<CanvasPanelsResponse>(`/canvas/panels?agent_id=${encodeURIComponent(agentId)}`),
+
+	// Plugins API
+	listPlugins: (agentId: string) =>
+		fetchJson<PluginsResponse>(`/agents/plugins?agent_id=${encodeURIComponent(agentId)}`),
+
+	pluginUiUrl: (agentId: string, pluginName: string) =>
+		`${API_BASE}/agents/plugins/${encodeURIComponent(pluginName)}/ui?agent_id=${encodeURIComponent(agentId)}`,
 };

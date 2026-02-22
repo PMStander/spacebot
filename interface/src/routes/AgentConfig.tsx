@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, cx } from "@/ui";
+import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
@@ -43,6 +43,13 @@ const getIdentityField = (data: { soul: string | null; identity: string | null; 
 		return data[field];
 	}
 	return null;
+};
+
+/** Check if a model ID supports adaptive thinking (extended thinking / reasoning). */
+const supportsAdaptiveThinking = (modelId: string): boolean => {
+	if (!modelId) return false;
+	const lower = modelId.toLowerCase();
+	return lower.includes("claude") || lower.includes("deepseek-r") || lower.includes("o1") || lower.includes("o3") || lower.includes("gemini-2.5");
 };
 
 export function AgentConfig({ agentId }: AgentConfigProps) {
@@ -542,27 +549,30 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 									description={description}
 									value={localValues[key] as string}
 									onChange={(v) => handleChange(key, v)}
-									capability={key === "voice" ? "input_audio" : undefined}
+									capability={key === "voice" ? "voice_transcription" : undefined}
 								/>
 								{supportsAdaptiveThinking(localValues[key] as string) && (
 									<div className="ml-4 flex flex-col gap-1">
 										<label className="text-xs font-medium text-ink-dull">Thinking Effort</label>
-										<select
+										<Select
 											value={(localValues[`${key}_thinking_effort`] as string) || "auto"}
-											onChange={(e) => handleChange(`${key}_thinking_effort`, e.target.value)}
-											className="w-full rounded-md border border-app-line/50 bg-app-darkBox/30 px-3 py-1.5 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+											onValueChange={(value) => handleChange(`${key}_thinking_effort`, value)}
 										>
-											<option value="auto">Auto</option>
-											<option value="max">Max</option>
-											<option value="high">High</option>
-											<option value="medium">Medium</option>
-											<option value="low">Low</option>
-										</select>
+											<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+												<SelectValue />
+											</SelectTrigger>
+											<SelectContent>
+												<SelectItem value="auto">Auto</SelectItem>
+												<SelectItem value="max">Max</SelectItem>
+												<SelectItem value="high">High</SelectItem>
+												<SelectItem value="medium">Medium</SelectItem>
+												<SelectItem value="low">Low</SelectItem>
+											</SelectContent>
+										</Select>
 									</div>
 								)}
 							</div>
 						))}
->>>>>>> c7b10e8 (feat(api): add voice model support and audio transcription capabilities)
 						<NumberStepper
 							label="Rate Limit Cooldown"
 							description="Seconds to deprioritize rate-limited models"
@@ -760,6 +770,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 						</div>
 					</div>
 				);
+			}
 			case "tuning":
 				return (
 					<div className="grid gap-4">
@@ -1031,7 +1042,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 // -- Form Field Components --
 
-interface ConfigFieldProps {
+/* interface ConfigFieldProps {
 	label: string;
 	description: string;
 	value: string;
@@ -1051,7 +1062,7 @@ function ConfigField({ label, description, value, onChange }: ConfigFieldProps) 
 			/>
 		</div>
 	);
-}
+} */
 
 interface ConfigToggleFieldProps {
 	label: string;

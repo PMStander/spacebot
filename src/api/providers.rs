@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Serialize)]
@@ -19,11 +20,13 @@ pub(super) struct ProviderStatus {
     deepseek: bool,
     xai: bool,
     mistral: bool,
+    gemini: bool,
+    ollama: bool,
     opencode_zen: bool,
+    nvidia: bool,
     minimax: bool,
     moonshot: bool,
     zai_coding_plan: bool,
-    gemini: bool,
 }
 
 #[derive(Serialize)]
@@ -44,6 +47,181 @@ pub(super) struct ProviderUpdateResponse {
     message: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct ProviderModelTestRequest {
+    provider: String,
+    api_key: String,
+    model: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct ProviderModelTestResponse {
+    success: bool,
+    message: String,
+    provider: String,
+    model: String,
+    sample: Option<String>,
+}
+
+fn provider_toml_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("anthropic_key"),
+        "openai" => Some("openai_key"),
+        "openrouter" => Some("openrouter_key"),
+        "zhipu" => Some("zhipu_key"),
+        "groq" => Some("groq_key"),
+        "together" => Some("together_key"),
+        "fireworks" => Some("fireworks_key"),
+        "deepseek" => Some("deepseek_key"),
+        "xai" => Some("xai_key"),
+        "mistral" => Some("mistral_key"),
+        "gemini" => Some("gemini_key"),
+        "ollama" => Some("ollama_base_url"),
+        "opencode-zen" => Some("opencode_zen_key"),
+        "nvidia" => Some("nvidia_key"),
+        "minimax" => Some("minimax_key"),
+        "moonshot" => Some("moonshot_key"),
+        "zai-coding-plan" => Some("zai_coding_plan_key"),
+        _ => None,
+    }
+}
+
+fn model_matches_provider(provider: &str, model: &str) -> bool {
+    crate::llm::routing::provider_from_model(model) == provider
+}
+
+fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::LlmConfig {
+    use crate::config::{ApiType, ProviderConfig};
+
+    let mut providers = HashMap::new();
+    let provider_config = match provider {
+        "anthropic" => Some(ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: "https://api.anthropic.com".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "openai" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.openai.com".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "openrouter" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://openrouter.ai/api".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "zhipu" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.z.ai/api/paas/v4".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "groq" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.groq.com/openai".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "together" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.together.xyz".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "fireworks" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.fireworks.ai/inference".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "deepseek" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "xai" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.x.ai".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "mistral" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.mistral.ai".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "gemini" => Some(ProviderConfig {
+            api_type: ApiType::Gemini,
+            base_url: crate::config::GEMINI_PROVIDER_BASE_URL.to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "opencode-zen" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://opencode.ai/zen".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "nvidia" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://integrate.api.nvidia.com".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "minimax" => Some(ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: "https://api.minimax.io/anthropic".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "moonshot" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.moonshot.ai".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        "zai-coding-plan" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
+        _ => None,
+    };
+
+    if let Some(provider_config) = provider_config {
+        providers.insert(provider.to_string(), provider_config);
+    }
+
+    crate::config::LlmConfig {
+        anthropic_key: (provider == "anthropic").then(|| credential.to_string()),
+        openai_key: (provider == "openai").then(|| credential.to_string()),
+        openrouter_key: (provider == "openrouter").then(|| credential.to_string()),
+        zhipu_key: (provider == "zhipu").then(|| credential.to_string()),
+        zhipu_sub_key: (provider == "zhipu-sub").then(|| credential.to_string()),
+        groq_key: (provider == "groq").then(|| credential.to_string()),
+        together_key: (provider == "together").then(|| credential.to_string()),
+        fireworks_key: (provider == "fireworks").then(|| credential.to_string()),
+        deepseek_key: (provider == "deepseek").then(|| credential.to_string()),
+        xai_key: (provider == "xai").then(|| credential.to_string()),
+        mistral_key: (provider == "mistral").then(|| credential.to_string()),
+        gemini_key: (provider == "gemini").then(|| credential.to_string()),
+        ollama_key: None,
+        ollama_base_url: (provider == "ollama").then(|| credential.to_string()),
+        opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
+        nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
+        minimax_key: (provider == "minimax").then(|| credential.to_string()),
+        moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
+        zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
+        providers,
+    }
+}
+
 pub(super) async fn get_providers(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
@@ -61,11 +239,13 @@ pub(super) async fn get_providers(
         deepseek,
         xai,
         mistral,
+        gemini,
+        ollama,
         opencode_zen,
+        nvidia,
         minimax,
         moonshot,
         zai_coding_plan,
-        gemini,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -74,37 +254,39 @@ pub(super) async fn get_providers(
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let has_key = |key: &str, env_var: &str| -> bool {
-            if let Some(llm) = doc.get("llm") {
-                if let Some(val) = llm.get(key) {
-                    if let Some(s) = val.as_str() {
-                        if let Some(var_name) = s.strip_prefix("env:") {
-                            return std::env::var(var_name).is_ok();
-                        }
-                        return !s.is_empty();
-                    }
+        let has_value = |key: &str, env_var: &str| -> bool {
+            if let Some(llm) = doc.get("llm")
+                && let Some(val) = llm.get(key)
+                && let Some(s) = val.as_str()
+            {
+                if let Some(var_name) = s.strip_prefix("env:") {
+                    return std::env::var(var_name).is_ok();
                 }
+                return !s.is_empty();
             }
             std::env::var(env_var).is_ok()
         };
 
         (
-            has_key("anthropic_key", "ANTHROPIC_API_KEY"),
-            has_key("openai_key", "OPENAI_API_KEY"),
-            has_key("openrouter_key", "OPENROUTER_API_KEY"),
-            has_key("zhipu_key", "ZHIPU_API_KEY"),
-            has_key("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
-            has_key("groq_key", "GROQ_API_KEY"),
-            has_key("together_key", "TOGETHER_API_KEY"),
-            has_key("fireworks_key", "FIREWORKS_API_KEY"),
-            has_key("deepseek_key", "DEEPSEEK_API_KEY"),
-            has_key("xai_key", "XAI_API_KEY"),
-            has_key("mistral_key", "MISTRAL_API_KEY"),
-            has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
-            has_key("minimax_key", "MINIMAX_API_KEY"),
-            has_key("moonshot_key", "MOONSHOT_API_KEY"),
-            has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
-            has_key("gemini_key", "GEMINI_API_KEY"),
+            has_value("anthropic_key", "ANTHROPIC_API_KEY"),
+            has_value("openai_key", "OPENAI_API_KEY"),
+            has_value("openrouter_key", "OPENROUTER_API_KEY"),
+            has_value("zhipu_key", "ZHIPU_API_KEY"),
+            has_value("zhipu_sub_key", "ZHIPU_SUB_API_KEY"),
+            has_value("groq_key", "GROQ_API_KEY"),
+            has_value("together_key", "TOGETHER_API_KEY"),
+            has_value("fireworks_key", "FIREWORKS_API_KEY"),
+            has_value("deepseek_key", "DEEPSEEK_API_KEY"),
+            has_value("xai_key", "XAI_API_KEY"),
+            has_value("mistral_key", "MISTRAL_API_KEY"),
+            has_value("gemini_key", "GEMINI_API_KEY"),
+            has_value("ollama_base_url", "OLLAMA_BASE_URL")
+                || has_value("ollama_key", "OLLAMA_API_KEY"),
+            has_value("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            has_value("nvidia_key", "NVIDIA_API_KEY"),
+            has_value("minimax_key", "MINIMAX_API_KEY"),
+            has_value("moonshot_key", "MOONSHOT_API_KEY"),
+            has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
         )
     } else {
         (
@@ -119,11 +301,13 @@ pub(super) async fn get_providers(
             std::env::var("DEEPSEEK_API_KEY").is_ok(),
             std::env::var("XAI_API_KEY").is_ok(),
             std::env::var("MISTRAL_API_KEY").is_ok(),
+            std::env::var("GEMINI_API_KEY").is_ok(),
+            std::env::var("OLLAMA_BASE_URL").is_ok() || std::env::var("OLLAMA_API_KEY").is_ok(),
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
+            std::env::var("NVIDIA_API_KEY").is_ok(),
             std::env::var("MINIMAX_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
-            std::env::var("GEMINI_API_KEY").is_ok(),
         )
     };
 
@@ -139,11 +323,13 @@ pub(super) async fn get_providers(
         deepseek,
         xai,
         mistral,
+        gemini,
+        ollama,
         opencode_zen,
+        nvidia,
         minimax,
         moonshot,
         zai_coding_plan,
-        gemini,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -156,11 +342,13 @@ pub(super) async fn get_providers(
         || providers.deepseek
         || providers.xai
         || providers.mistral
+        || providers.gemini
+        || providers.ollama
         || providers.opencode_zen
+        || providers.nvidia
         || providers.minimax
         || providers.moonshot
-        || providers.zai_coding_plan
-        || providers.gemini;
+        || providers.zai_coding_plan;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -259,11 +447,13 @@ pub(super) async fn update_provider(
             "deepseek" => has_provider_key("deepseek_key", "DEEPSEEK_API_KEY"),
             "xai" => has_provider_key("xai_key", "XAI_API_KEY"),
             "mistral" => has_provider_key("mistral_key", "MISTRAL_API_KEY"),
+            "gemini" => has_provider_key("gemini_key", "GEMINI_API_KEY"),
+            "ollama" => has_provider_key("ollama_base_url", "OLLAMA_BASE_URL"),
             "opencode-zen" => has_provider_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            "nvidia" => has_provider_key("nvidia_key", "NVIDIA_API_KEY"),
             "minimax" => has_provider_key("minimax_key", "MINIMAX_API_KEY"),
             "moonshot" => has_provider_key("moonshot_key", "MOONSHOT_API_KEY"),
             "zai-coding-plan" => has_provider_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
-            "gemini" => has_provider_key("gemini_key", "GEMINI_API_KEY"),
             _ => false,
         };
 
@@ -365,10 +555,10 @@ pub(super) async fn delete_provider(
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if let Some(llm) = doc.get_mut("llm") {
-        if let Some(table) = llm.as_table_mut() {
-            table.remove(key_name);
-        }
+    if let Some(llm) = doc.get_mut("llm")
+        && let Some(table) = llm.as_table_mut()
+    {
+        table.remove(key_name);
     }
 
     tokio::fs::write(&config_path, doc.to_string())

@@ -36,13 +36,14 @@ pub async fn run_maintenance(
     let mut report = MaintenanceReport::default();
 
     // Apply decay to all non-identity memories
-    report.decayed = apply_decay(memory_store, config.decay_rate).await?;
-
-    // Prune old, low-importance memories
-    report.pruned = prune_memories(memory_store, config).await?;
-
-    // Merge near-duplicate memories
-    report.merged = merge_similar_memories(memory_store, config.merge_similarity_threshold).await?;
+    // Fields are assigned sequentially because the values are async — can't use struct literal.
+    #[allow(clippy::field_reassign_with_default)]
+    {
+        report.decayed = apply_decay(memory_store, config.decay_rate).await?;
+        report.pruned = prune_memories(memory_store, config).await?;
+        report.merged =
+            merge_similar_memories(memory_store, config.merge_similarity_threshold).await?;
+    }
 
     Ok(report)
 }

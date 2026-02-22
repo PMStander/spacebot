@@ -14,6 +14,7 @@ mod cortex;
 mod cron;
 mod ingest;
 mod local_file;
+mod mcp;
 mod memories;
 mod messaging;
 mod models;

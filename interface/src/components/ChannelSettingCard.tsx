@@ -57,14 +57,22 @@ export function ChannelSettingCard({
 		null,
 	);
 	const [addingBinding, setAddingBinding] = useState(false);
-	const [bindingForm, setBindingForm] = useState({
+	const [bindingForm, setBindingForm] = useState<{
+		agent_id: string;
+		guild_id: string;
+		workspace_id: string;
+		chat_id: string;
+		channel_ids: string[];
+		require_mention: boolean;
+		dm_allowed_users: string[];
+	}>({
 		agent_id: "main",
 		guild_id: "",
 		workspace_id: "",
 		chat_id: "",
-		channel_ids: [] as string[],
+		channel_ids: [],
 		require_mention: false,
-		dm_allowed_users: [] as string[],
+		dm_allowed_users: [],
 	});
 
 	const {data: bindingsData} = useQuery({
@@ -820,6 +828,7 @@ function BindingForm({
 		workspace_id: string;
 		chat_id: string;
 		channel_ids: string[];
+		require_mention: boolean;
 		dm_allowed_users: string[];
 	};
 	setBindingForm: (form: any) => void;

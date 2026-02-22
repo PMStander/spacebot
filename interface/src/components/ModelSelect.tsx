@@ -3,13 +3,13 @@ import { Input } from "@/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-interface ModelSelectProps {
-  label: string;
-  description: string;
+export interface ModelSelectProps {
+  label?: string;
+  description?: string;
   value: string;
   onChange: (value: string) => void;
   provider?: string;
-  capability?: "input_audio";
+  capability?: "input_audio" | "voice_transcription";
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -133,6 +133,7 @@ export function ModelSelect({
     "deepseek",
     "xai",
     "mistral",
+    "gemini",
     "groq",
     "together",
     "fireworks",
