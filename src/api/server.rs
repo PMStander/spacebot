@@ -2,8 +2,8 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
-    providers, settings, skills, system, webchat,
+    agents, artifacts, bindings, canvas, channels, config, cortex, cron, ingest, local_file, mcp,
+    memories, messaging, models, providers, settings, skills, system, webchat, workers,
 };
 
 use axum::Json;
@@ -70,7 +70,13 @@ pub async fn start_http_server(
         )
         .route("/mcp/status", get(mcp::mcp_status))
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels))
+        .route(
+            "/channels",
+            get(channels::list_channels)
+                .post(channels::create_internal_channel)
+                .put(channels::rename_channel)
+                .delete(channels::delete_channel),
+        )
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
@@ -83,6 +89,11 @@ pub async fn start_http_server(
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
+        .route(
+            "/cortex-chat/spawn-worker",
+            post(cortex::cortex_chat_spawn_worker),
+        )
+        .route("/cortex-chat/upload", post(cortex::upload_chat_files))
         .route("/agents/profile", get(agents::get_agent_profile))
         .route(
             "/agents/identity",
@@ -148,6 +159,20 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route(
+            "/agents/artifacts",
+            get(artifacts::list_artifacts)
+                .post(artifacts::create_artifact),
+        )
+        .route(
+            "/agents/artifacts/{id}",
+            get(artifacts::get_artifact)
+                .put(artifacts::update_artifact)
+                .delete(artifacts::delete_artifact),
+        )
+        .route("/agents/canvas", get(canvas::list_canvas_panels))
+        .route("/agents/workers", get(workers::list_worker_runs))
+        .route("/local-file", get(local_file::serve_local_file))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,

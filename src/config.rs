@@ -193,7 +193,7 @@ const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
-const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
+pub(crate) const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 

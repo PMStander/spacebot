@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use rig::completion::{CompletionModel, Prompt};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -169,7 +170,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         }),
         "nvidia" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
-            base_url: "https://integrate.api.nvidia.com".to_string(),
+            base_url: crate::config::NVIDIA_PROVIDER_BASE_URL.to_string(),
             api_key: credential.to_string(),
             name: None,
         }),
@@ -571,31 +572,89 @@ pub(super) async fn delete_provider(
     }))
 }
 
-#[derive(Deserialize)]
-pub(super) struct ProviderTestRequest {
-    provider: String,
-    model: String,
-}
-
-/// Lightweight connectivity validation endpoint for provider/model pairs.
+/// Live provider/model connectivity test.
 ///
-/// This currently performs input validation only; full live probes can be added
-/// once provider-specific test flows are standardized in the API layer.
+/// Sends a minimal prompt to the specified provider and model to verify the
+/// API key works and the model is reachable.
 pub(super) async fn test_provider_model(
-    Json(request): Json<ProviderTestRequest>,
-) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
-    if request.provider.trim().is_empty() || request.model.trim().is_empty() {
-        return Ok(Json(ProviderUpdateResponse {
+    Json(request): Json<ProviderModelTestRequest>,
+) -> Result<Json<ProviderModelTestResponse>, StatusCode> {
+    if provider_toml_key(&request.provider).is_none() {
+        return Ok(Json(ProviderModelTestResponse {
             success: false,
-            message: "provider and model are required".to_string(),
+            message: format!("Unknown provider: {}", request.provider),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
         }));
     }
 
-    Ok(Json(ProviderUpdateResponse {
-        success: true,
-        message: format!(
-            "Provider test request accepted for provider '{}' and model '{}'",
-            request.provider, request.model
-        ),
-    }))
+    if request.api_key.trim().is_empty() {
+        return Ok(Json(ProviderModelTestResponse {
+            success: false,
+            message: "API key cannot be empty".to_string(),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
+        }));
+    }
+
+    if request.model.trim().is_empty() {
+        return Ok(Json(ProviderModelTestResponse {
+            success: false,
+            message: "Model cannot be empty".to_string(),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
+        }));
+    }
+
+    if !model_matches_provider(&request.provider, &request.model) {
+        return Ok(Json(ProviderModelTestResponse {
+            success: false,
+            message: format!(
+                "Model '{}' does not match provider '{}'.",
+                request.model, request.provider
+            ),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
+        }));
+    }
+
+    let llm_config = build_test_llm_config(&request.provider, request.api_key.trim());
+    let llm_manager = match crate::llm::LlmManager::new(llm_config).await {
+        Ok(manager) => Arc::new(manager),
+        Err(error) => {
+            return Ok(Json(ProviderModelTestResponse {
+                success: false,
+                message: format!("Failed to initialize provider: {error}"),
+                provider: request.provider,
+                model: request.model,
+                sample: None,
+            }));
+        }
+    };
+
+    let model = crate::llm::SpacebotModel::make(&llm_manager, request.model.clone());
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble("You are running a provider connectivity check. Reply with exactly: OK")
+        .build();
+
+    match agent.prompt("Connection test").await {
+        Ok(sample) => Ok(Json(ProviderModelTestResponse {
+            success: true,
+            message: "Model responded successfully".to_string(),
+            provider: request.provider,
+            model: request.model,
+            sample: Some(sample),
+        })),
+        Err(error) => Ok(Json(ProviderModelTestResponse {
+            success: false,
+            message: format!("Model test failed: {error}"),
+            provider: request.provider,
+            model: request.model,
+            sample: None,
+        })),
+    }
 }
