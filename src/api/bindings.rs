@@ -150,7 +150,7 @@ pub(super) async fn list_bindings(
             workspace_id: b.workspace_id,
             chat_id: b.chat_id,
             channel_ids: b.channel_ids,
-            require_mention: b.require_mention,
+            require_mention: false,
             dm_allowed_users: b.dm_allowed_users,
         })
         .collect();

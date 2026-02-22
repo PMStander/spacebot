@@ -380,3 +380,32 @@ pub(super) async fn delete_provider(
         message: format!("Provider '{}' removed", provider),
     }))
 }
+
+#[derive(Deserialize)]
+pub(super) struct ProviderTestRequest {
+    provider: String,
+    model: String,
+}
+
+/// Lightweight connectivity validation endpoint for provider/model pairs.
+///
+/// This currently performs input validation only; full live probes can be added
+/// once provider-specific test flows are standardized in the API layer.
+pub(super) async fn test_provider_model(
+    Json(request): Json<ProviderTestRequest>,
+) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
+    if request.provider.trim().is_empty() || request.model.trim().is_empty() {
+        return Ok(Json(ProviderUpdateResponse {
+            success: false,
+            message: "provider and model are required".to_string(),
+        }));
+    }
+
+    Ok(Json(ProviderUpdateResponse {
+        success: true,
+        message: format!(
+            "Provider test request accepted for provider '{}' and model '{}'",
+            request.provider, request.model
+        ),
+    }))
+}

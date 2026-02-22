@@ -1245,6 +1245,28 @@ async fn initialize_agents(
             embedding_model.clone(),
         ));
 
+        let vector_config = spacebot::vector::VectorConfig::default();
+        let (document_search, document_index_stats) = spacebot::vector::initialize_document_search(
+            &db.lance,
+            embedding_model.clone(),
+            &agent_config.workspace,
+            vector_config,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to initialize document vector search for agent '{}'",
+                agent_config.id
+            )
+        })?;
+        tracing::info!(
+            agent = %agent_config.id,
+            indexed = document_index_stats.indexed,
+            failed = document_index_stats.failed,
+            discovered = document_index_stats.total_discovered,
+            "document vector indexing complete"
+        );
+
         // Per-agent event bus (broadcast for fan-out to multiple channels)
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
 
@@ -1298,6 +1320,7 @@ async fn initialize_agents(
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
             api_event_tx: Some(api_state.event_tx.clone()),
+            document_search: Some(document_search),
         };
 
         let agent = spacebot::Agent {
@@ -1487,8 +1510,8 @@ async fn initialize_agents(
                 delivery_target: cron_def.delivery_target.clone(),
                 active_hours: cron_def.active_hours,
                 enabled: cron_def.enabled,
-                run_once: cron_def.run_once,
-                timeout_secs: cron_def.timeout_secs,
+                run_once: false,
+                timeout_secs: None,
             };
             if let Err(error) = store.save(&cron_config).await {
                 tracing::warn!(
@@ -1593,6 +1616,7 @@ async fn initialize_agents(
                 agent.db.sqlite.clone(),
                 agent_id.to_string(),
                 api_state.event_tx.clone(),
+                agent.deps.document_search.clone(),
             );
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
 

@@ -1,14 +1,14 @@
-//! OpenCode subprocess integration for coding workers.
+//! OpenCode worker integration.
 //!
-//! Manages persistent OpenCode server processes and drives coding sessions
-//! through their HTTP API + SSE event stream. This module provides an
-//! alternative worker backend that delegates to OpenCode's full agent
-//! capabilities instead of running a Rig agent loop with basic tools.
+//! OpenCode workers are full coding agents that run as subprocesses
+//! with their own codebase exploration, context management, and tool suite.
 
 pub mod server;
 pub mod types;
 pub mod worker;
 
-pub use server::{OpenCodeServer, OpenCodeServerPool};
-pub use types::{OpenCodePermissions, QuestionAnswer, QuestionInfo, QuestionOption};
-pub use worker::{OpenCodeWorker, OpenCodeWorkerResult};
+pub use server::OpenCodeServerPool;
+pub use types::{OpenCodePermissions, QuestionInfo};
+pub use worker::OpenCodeWorker;
+
+pub use crate::config::OpenCodeConfig;

@@ -76,8 +76,10 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         cron_tool: None,
         runtime_config,
         event_tx,
+        api_event_tx: None,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        document_search: None,
     };
 
     Ok((deps, config))
@@ -255,6 +257,7 @@ async fn dump_branch_context() {
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        None,
     );
 
     let tool_defs = branch_tool_server
@@ -315,6 +318,9 @@ async fn dump_worker_context() {
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
+        deps.sqlite_pool.clone(),
+        deps.api_event_tx.clone(),
+        deps.document_search.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -432,6 +438,7 @@ async fn dump_all_contexts() {
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        None,
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -462,6 +469,9 @@ async fn dump_all_contexts() {
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
+        deps.sqlite_pool.clone(),
+        deps.api_event_tx.clone(),
+        deps.document_search.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

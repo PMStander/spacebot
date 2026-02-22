@@ -220,6 +220,7 @@ pub(super) async fn create_agent(
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
         default: false,
+        group: None,
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -237,7 +238,7 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    drop(defaults);
+    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -293,8 +294,32 @@ pub(super) async fn create_agent(
     let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(
         memory_store,
         embedding_table,
-        embedding_model,
+        embedding_model.clone(),
     ));
+
+    let vector_config = crate::vector::VectorConfig::default();
+    let (document_search, document_index_stats) = crate::vector::initialize_document_search(
+        &db.lance,
+        embedding_model,
+        &agent_config.workspace,
+        vector_config,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            %error,
+            agent_id = %agent_id,
+            "failed to initialize document vector search"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    tracing::info!(
+        agent_id = %agent_id,
+        indexed = document_index_stats.indexed,
+        failed = document_index_stats.failed,
+        discovered = document_index_stats.total_discovered,
+        "document vector indexing complete"
+    );
 
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
@@ -361,11 +386,13 @@ pub(super) async fn create_agent(
         cron_tool: None,
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
+        api_event_tx: Some(state.event_tx.clone()),
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: {
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
         },
+        document_search: Some(document_search.clone()),
     };
 
     let event_rx = event_tx.subscribe();
@@ -404,6 +431,10 @@ pub(super) async fn create_agent(
         brave_search_key,
         runtime_config.workspace_dir.clone(),
         runtime_config.instance_dir.clone(),
+        db.sqlite.clone(),
+        agent_id.clone(),
+        state.event_tx.clone(),
+        Some(document_search),
     );
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
@@ -458,6 +489,7 @@ pub(super) async fn create_agent(
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
+            group: agent_config.group.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,

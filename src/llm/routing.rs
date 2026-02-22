@@ -79,6 +79,14 @@ impl RoutingConfig {
             .map(|v| v.as_slice())
             .unwrap_or(&[])
     }
+
+    /// Return configured reasoning effort for a model.
+    ///
+    /// Spacebot currently uses provider defaults; this hook keeps the call-site
+    /// stable while we phase in per-model effort tuning.
+    pub fn thinking_effort_for_model(&self, _model_name: &str) -> &str {
+        "auto"
+    }
 }
 
 /// Whether an HTTP status code should trigger a fallback to the next model.
@@ -290,7 +298,6 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 rate_limit_cooldown_secs: 60,
                 ..RoutingConfig::default()
             }
->>>>>>> c7b10e8 (feat(api): add voice model support and audio transcription capabilities)
         }
         "openai" => RoutingConfig::for_model("openai/gpt-4.1".into()),
         "zhipu" => RoutingConfig::for_model("zhipu/glm-4-plus".into()),
@@ -362,3 +369,5 @@ pub const RETRY_BASE_DELAY_MS: u64 = 500;
 /// momentary and shouldn't lock out a model for the full cooldown period.
 pub fn is_rate_limit_error(error_message: &str) -> bool {
     let lower = error_message.to_lowercase();
+    lower.contains("429") || lower.contains("rate limit")
+}

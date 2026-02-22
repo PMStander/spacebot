@@ -357,6 +357,8 @@ pub struct OpenCodeConfig {
     pub max_restart_retries: u32,
     /// Permission settings passed to OpenCode's config.
     pub permissions: crate::opencode::OpenCodePermissions,
+    /// Default model for OpenCode workers (e.g. "anthropic/claude-sonnet-4").
+    pub default_model: Option<String>,
 }
 
 impl Default for OpenCodeConfig {
@@ -368,6 +370,7 @@ impl Default for OpenCodeConfig {
             server_startup_timeout_secs: 30,
             max_restart_retries: 5,
             permissions: crate::opencode::OpenCodePermissions::default(),
+            default_model: None,
         }
     }
 }
@@ -763,6 +766,10 @@ pub struct SlackConfig {
 pub struct DiscordPermissions {
     pub guild_filter: Option<Vec<u64>>,
     pub channel_filter: std::collections::HashMap<u64, Vec<u64>>,
+    /// Guilds where a bot mention (or reply-to-bot) is required before routing.
+    pub mention_required_guilds: Vec<u64>,
+    /// Per-guild channels where mention is required before routing.
+    pub mention_required_channels: std::collections::HashMap<u64, Vec<u64>>,
     pub dm_allowed_users: Vec<u64>,
     pub allow_bot_messages: bool,
 }
@@ -881,6 +888,8 @@ impl DiscordPermissions {
         Self {
             guild_filter,
             channel_filter,
+            mention_required_guilds: Vec::new(),
+            mention_required_channels: std::collections::HashMap::new(),
             dm_allowed_users,
             allow_bot_messages: discord.allow_bot_messages,
         }
@@ -1329,6 +1338,7 @@ struct TomlOpenCodeConfig {
     server_startup_timeout_secs: Option<u64>,
     max_restart_retries: Option<u32>,
     permissions: Option<TomlOpenCodePermissions>,
+    default_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1956,15 +1966,15 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
-            providers: toml
-                .llm
-                .providers
             gemini_key: toml
                 .llm
                 .gemini_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("GEMINI_API_KEY").ok()),
+            providers: toml
+                .llm
+                .providers
                 .into_iter()
                 .map(|(provider_id, config)| {
                     (
@@ -2068,7 +2078,6 @@ impl Config {
                     name: None,
                 });
         }
-
 
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
@@ -2248,6 +2257,7 @@ impl Config {
                                     .unwrap_or_else(|| base.permissions.webfetch.clone()),
                             })
                             .unwrap_or_else(|| base.permissions.clone()),
+                        default_model: oc.default_model.or(base.default_model.clone()),
                     }
                 })
                 .unwrap_or_else(|| base_defaults.opencode.clone()),

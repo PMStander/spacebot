@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod cli_worker;
 pub mod config;
 pub mod conversation;
 pub mod cron;
@@ -23,6 +24,7 @@ pub mod skills;
 pub mod telemetry;
 pub mod tools;
 pub mod update;
+pub mod vector;
 
 pub use error::{Error, Result};
 
@@ -179,8 +181,10 @@ pub struct AgentDeps {
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
+    pub api_event_tx: Option<tokio::sync::broadcast::Sender<api::ApiEvent>>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
+    pub document_search: Option<Arc<vector::DocumentSearch>>,
 }
 
 impl AgentDeps {

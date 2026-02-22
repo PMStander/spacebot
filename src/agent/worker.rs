@@ -196,6 +196,7 @@ impl Worker {
             self.deps.runtime_config.instance_dir.clone(),
             self.deps.sqlite_pool.clone(),
             self.deps.api_event_tx.clone(),
+            self.deps.document_search.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();

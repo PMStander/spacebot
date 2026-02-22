@@ -561,10 +561,20 @@ impl CortexChatSession {
         let cli_backends: Vec<(String, String)> = cli_config
             .backends
             .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .map(
+                |(name, cfg): (&String, &crate::cli_worker::CliBackendConfig)| {
+                    (name.clone(), cfg.description.clone())
+                },
+            )
             .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
+            .render_worker_capabilities(
+                browser_enabled,
+                web_search_enabled,
+                opencode_enabled,
+                cli_workers_enabled,
+                &cli_backends,
+            )
             .expect("failed to render worker capabilities");
 
         // Load channel transcript if a channel context is active

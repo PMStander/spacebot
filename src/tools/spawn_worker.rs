@@ -49,6 +49,11 @@ pub struct SpawnWorkerArgs {
     /// The OpenCode agent will operate in this directory.
     #[serde(default)]
     pub directory: Option<String>,
+    /// Optional model override for the worker (e.g. "anthropic/claude-sonnet-4").
+    /// Only applies to OpenCode workers. If not specified, uses the default
+    /// model from config. For skill-based routing, create skills in workspace/skills/.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Output from spawn worker tool.
@@ -83,6 +88,9 @@ impl Tool for SpawnWorkerTool {
         }
         if web_search_enabled {
             tools_list.push("web_search");
+        }
+        if self.state.deps.document_search.is_some() {
+            tools_list.push("vector_search");
         }
 
         let opencode_note = if opencode_enabled {
@@ -129,6 +137,13 @@ impl Tool for SpawnWorkerTool {
                     "description": "Working directory for the worker. Required when worker_type is \"opencode\". The OpenCode agent operates in this directory."
                 }),
             );
+            properties.as_object_mut().unwrap().insert(
+                "model".to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Optional model override for OpenCode workers (e.g., \"anthropic/claude-sonnet-4\"). If not specified, uses default model from config. For skill-based routing, create skills in workspace/skills/ with appropriate model specifications. Only applies to worker_type \"opencode\"."
+                }),
+            );
         }
 
         ToolDefinition {
@@ -150,9 +165,15 @@ impl Tool for SpawnWorkerTool {
                 SpawnWorkerError("directory is required for opencode workers".into())
             })?;
 
-            spawn_opencode_worker_from_state(&self.state, &args.task, directory, args.interactive)
-                .await
-                .map_err(|e| SpawnWorkerError(format!("{e}")))?
+            spawn_opencode_worker_from_state(
+                &self.state,
+                &args.task,
+                directory,
+                args.interactive,
+                args.model.as_deref(),
+            )
+            .await
+            .map_err(|e| SpawnWorkerError(format!("{e}")))?
         } else {
             spawn_worker_from_state(
                 &self.state,

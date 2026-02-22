@@ -780,6 +780,7 @@ async fn initialize_agents(
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
             api_event_tx: Some(api_state.event_tx.clone()),
+            document_search: None,
         };
 
         let agent = spacebot::Agent {

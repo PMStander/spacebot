@@ -585,10 +585,20 @@ impl Channel {
         let cli_backends: Vec<(String, String)> = cli_config
             .backends
             .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .map(
+                |(name, cfg): (&String, &crate::cli_worker::CliBackendConfig)| {
+                    (name.clone(), cfg.description.clone())
+                },
+            )
             .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
+            .render_worker_capabilities(
+                browser_enabled,
+                web_search_enabled,
+                opencode_enabled,
+                cli_workers_enabled,
+                &cli_backends,
+            )
             .expect("failed to render worker capabilities");
 
         let status_text = {
@@ -786,10 +796,20 @@ impl Channel {
         let cli_backends: Vec<(String, String)> = cli_config
             .backends
             .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.description.clone()))
+            .map(
+                |(name, cfg): (&String, &crate::cli_worker::CliBackendConfig)| {
+                    (name.clone(), cfg.description.clone())
+                },
+            )
             .collect();
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, cli_workers_enabled, &cli_backends)
+            .render_worker_capabilities(
+                browser_enabled,
+                web_search_enabled,
+                opencode_enabled,
+                cli_workers_enabled,
+                &cli_backends,
+            )
             .expect("failed to render worker capabilities");
 
         let status_text = {
@@ -830,6 +850,7 @@ impl Channel {
         crate::tools::SkipFlag,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
+        let replied_flag = crate::tools::new_replied_flag();
 
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
@@ -837,6 +858,7 @@ impl Channel {
             self.response_tx.clone(),
             conversation_id,
             skip_flag.clone(),
+            replied_flag.clone(),
             self.deps.cron_tool.clone(),
         )
         .await
@@ -1275,6 +1297,7 @@ async fn spawn_branch(
         state.deps.memory_search.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
+        state.deps.document_search.clone(),
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
 
@@ -1459,6 +1482,7 @@ pub async fn spawn_opencode_worker_from_state(
     task: impl Into<String>,
     directory: &str,
     interactive: bool,
+    model: Option<&str>,
 ) -> std::result::Result<crate::WorkerId, AgentError> {
     check_worker_limit(state).await?;
     let task = task.into();
@@ -1475,7 +1499,7 @@ pub async fn spawn_opencode_worker_from_state(
 
     let server_pool = rc.opencode_server_pool.clone();
 
-    let worker = if interactive {
+    let mut worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
@@ -1502,8 +1526,25 @@ pub async fn spawn_opencode_worker_from_state(
         )
     };
 
+    // Apply model selection (priority: explicit model parameter > default model from config)
+    if let Some(model_name) = model {
+        // Explicit model override from spawn_worker call
+        tracing::debug!(
+            task = %task,
+            model = %model_name,
+            "OpenCode worker using explicit model"
+        );
+        worker = worker.with_model(model_name);
+    } else if let Some(default_model) = &opencode_config.default_model {
+        // Use default model from config
+        tracing::debug!(
+            task = %task,
+            model = %default_model,
+            "OpenCode worker using default model"
+        );
+        worker = worker.with_model(default_model.clone());
+    }
     let worker_id = worker.id;
-
     let worker_span = tracing::info_span!(
         "worker.run",
         worker_id = %worker_id,

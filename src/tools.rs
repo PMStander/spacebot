@@ -24,6 +24,7 @@
 pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
+pub mod canvas;
 pub mod channel_recall;
 pub mod cron;
 pub mod exec;
@@ -40,6 +41,7 @@ pub mod set_status;
 pub mod shell;
 pub mod skip;
 pub mod spawn_worker;
+pub mod vector_search;
 pub mod web_search;
 
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
@@ -48,6 +50,11 @@ pub use browser::{
     TabInfo,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
+pub use canvas::{
+    CanvasListArgs, CanvasListError, CanvasListOutput, CanvasListTool, CanvasRemoveArgs,
+    CanvasRemoveError, CanvasRemoveOutput, CanvasRemoveTool, CanvasSetArgs, CanvasSetError,
+    CanvasSetOutput, CanvasSetTool,
+};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
@@ -74,11 +81,15 @@ pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTo
 pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
 pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use vector_search::{
+    VectorSearchArgs, VectorSearchError, VectorSearchOutput, VectorSearchTool,
+};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 
 use crate::agent::channel::ChannelState;
 use crate::config::BrowserConfig;
 use crate::memory::MemorySearch;
+use crate::vector::DocumentSearch;
 use crate::{AgentId, ChannelId, OutboundResponse, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
@@ -196,13 +207,19 @@ pub fn create_branch_tool_server(
     memory_search: Arc<MemorySearch>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
+    document_search: Option<Arc<DocumentSearch>>,
 ) -> ToolServerHandle {
-    ToolServer::new()
+    let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
-        .tool(ChannelRecallTool::new(conversation_logger, channel_store))
-        .run()
+        .tool(ChannelRecallTool::new(conversation_logger, channel_store));
+
+    if let Some(search) = document_search {
+        server = server.tool(VectorSearchTool::new(search));
+    }
+
+    server.run()
 }
 
 /// Create a per-worker ToolServer with task-appropriate tools.
@@ -223,13 +240,19 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    sqlite_pool: sqlx::SqlitePool,
+    api_event_tx: Option<tokio::sync::broadcast::Sender<crate::api::ApiEvent>>,
+    document_search: Option<Arc<DocumentSearch>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace))
         .tool(SetStatusTool::new(
-            agent_id, worker_id, channel_id, event_tx,
+            agent_id.clone(),
+            worker_id,
+            channel_id,
+            event_tx,
         ));
 
     if browser_config.enabled {
@@ -238,6 +261,25 @@ pub fn create_worker_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    if let Some(search) = document_search {
+        server = server.tool(VectorSearchTool::new(search));
+    }
+
+    if let Some(api_tx) = api_event_tx {
+        server = server
+            .tool(CanvasSetTool::new(
+                sqlite_pool.clone(),
+                agent_id.to_string(),
+                api_tx.clone(),
+            ))
+            .tool(CanvasRemoveTool::new(
+                sqlite_pool.clone(),
+                agent_id.to_string(),
+                api_tx,
+            ))
+            .tool(CanvasListTool::new(sqlite_pool));
     }
 
     server.run()
@@ -267,6 +309,10 @@ pub fn create_cortex_chat_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    sqlite_pool: sqlx::SqlitePool,
+    agent_id: String,
+    api_event_tx: tokio::sync::broadcast::Sender<crate::api::ApiEvent>,
+    document_search: Option<Arc<DocumentSearch>>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
@@ -283,6 +329,23 @@ pub fn create_cortex_chat_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    server = server
+        .tool(CanvasSetTool::new(
+            sqlite_pool.clone(),
+            agent_id.clone(),
+            api_event_tx.clone(),
+        ))
+        .tool(CanvasRemoveTool::new(
+            sqlite_pool.clone(),
+            agent_id.clone(),
+            api_event_tx,
+        ))
+        .tool(CanvasListTool::new(sqlite_pool));
+
+    if let Some(search) = document_search {
+        server = server.tool(VectorSearchTool::new(search));
     }
 
     server.run()

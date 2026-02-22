@@ -476,6 +476,7 @@ async fn process_chunk(
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        deps.document_search.clone(),
     );
 
     let agent = AgentBuilder::new(model)

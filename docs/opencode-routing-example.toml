@@ -1,0 +1,73 @@
+# Example Spacebot Configuration with OpenCode Model Routing
+# This demonstrates the hybrid routing approach for OpenCode workers
+
+[agent]
+name = "spacebot-example"
+
+[llm.provider]
+type = "anthropic"
+api_key = "env:ANTHROPIC_API_KEY"
+
+[defaults]
+# Model routing for standard workers
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4-20250514"
+worker = "anthropic/claude-haiku-4-20250514"
+branch = "anthropic/claude-sonnet-4-20250514"
+
+# Task-type overrides for builtin workers
+[defaults.routing.task_overrides]
+"coding" = "anthropic/claude-sonnet-4-20250514"
+
+# OpenCode configuration with model routing
+[defaults.opencode]
+enabled = true
+path = "opencode"
+max_servers = 5
+server_startup_timeout_secs = 30
+max_restart_retries = 5
+
+# OpenCode permissions
+[defaults.opencode.permissions]
+edit = ["allow"]
+bash = ["allow", "network", "fs:read"]
+webfetch = ["allow"]
+
+# DEFAULT MODEL: Used when no routing rule matches and no explicit model is provided
+# This is optional - if omitted, OpenCode uses its own default model
+default_model = "anthropic/claude-sonnet-4-20250514"
+
+# TASK-BASED ROUTING: Pattern matching to select models based on task content
+# These patterns are matched case-insensitively against the task description
+[defaults.opencode.task_routing]
+# High-end model for complex refactoring work
+"refactor" = "anthropic/claude-sonnet-4-20250514"
+"rewrite" = "anthropic/claude-sonnet-4-20250514"
+"rearchitecture" = "anthropic/claude-sonnet-4-20250514"
+"migration" = "anthropic/claude-sonnet-4-20250514"
+
+# Fast model for simple tasks
+"typo" = "anthropic/claude-haiku-4-20250514"
+"rename" = "anthropic/claude-haiku-4-20250514"
+"simple" = "anthropic/claude-haiku-4-20250514"
+
+# Mid-tier model for test generation
+"test" = "anthropic/claude-sonnet-4-20250514"
+"testing" = "anthropic/claude-sonnet-4-20250514"
+
+# Fast model for documentation
+"documentation" = "anthropic/claude-haiku-4-20250514"
+"readme" = "anthropic/claude-haiku-4-20250514"
+"docstring" = "anthropic/claude-haiku-4-20250514"
+
+# Cost-optimized routing for different scenarios
+"urgent" = "anthropic/claude-sonnet-4-20250514"  # Quality for urgent tasks
+"experiment" = "anthropic/claude-haiku-4-20250514"  # Speed for experiments
+
+# Messaging configuration
+[messaging]
+type = "api"
+
+[api]
+enabled = true
+port = 8080
