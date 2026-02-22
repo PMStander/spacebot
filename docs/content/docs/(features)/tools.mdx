@@ -219,6 +219,7 @@ Retrieves conversation transcript from another channel. Operates in two modes:
 
 - **List mode** (no `channel` arg) — returns all known channels with their Discord names, message counts, and last activity timestamps. Lets the branch discover what channels exist.
 - **Transcript mode** (`channel` arg provided) — resolves the channel by name (fuzzy matching: exact → prefix → contains → raw ID), then returns up to 100 recent messages with sender, role, content, and timestamps.
+- **Pagination** (`before` cursor provided) — uses the cursor from the previous transcript response to fetch the next older page.
 
 If the name doesn't match any channel, falls back to list mode so the LLM can self-correct with the available options.
 

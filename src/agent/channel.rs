@@ -1147,8 +1147,10 @@ impl Channel {
                 for (key, value) in retrigger_metadata {
                     self.pending_retrigger_metadata.insert(key, value);
                 }
-                self.retrigger_deadline =
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS));
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
             }
         }
 

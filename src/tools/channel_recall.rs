@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 /// Maximum messages to return in a single recall.
 const MAX_TRANSCRIPT_MESSAGES: i64 = 100;
 
+/// Separator used in transcript pagination cursors.
+const CURSOR_SEPARATOR: char = ':';
+
 /// Tool for recalling conversation transcript from other channels.
 #[derive(Debug, Clone)]
 pub struct ChannelRecallTool {
@@ -43,6 +46,10 @@ pub struct ChannelRecallArgs {
     /// Maximum number of messages to return (default 50, max 100).
     #[serde(default = "default_message_limit")]
     pub limit: i64,
+    /// Opaque cursor returned by a previous call to paginate older messages.
+    /// Format: `<unix_seconds>:<message_id>`.
+    #[serde(default)]
+    pub before: Option<String>,
 }
 
 fn default_message_limit() -> i64 {
@@ -71,8 +78,16 @@ pub struct ChannelRecallOutput {
     pub messages: Vec<TranscriptMessage>,
     /// Available channels, if listing mode.
     pub available_channels: Vec<ChannelListEntry>,
+    /// Cursor for fetching the next (older) transcript page.
+    pub next_cursor: Option<String>,
     /// Formatted summary for the agent.
     pub summary: String,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptCursor {
+    before_unix_seconds: i64,
+    before_message_id: String,
 }
 
 /// An entry in the channel list.
@@ -107,6 +122,10 @@ impl Tool for ChannelRecallTool {
                         "maximum": 100,
                         "default": 50,
                         "description": "Maximum number of messages to retrieve (1-100)"
+                    },
+                    "before": {
+                        "type": "string",
+                        "description": "Optional cursor from a previous channel_recall call to fetch older messages"
                     }
                 }
             }),
@@ -119,6 +138,11 @@ impl Tool for ChannelRecallTool {
         };
 
         let limit = args.limit.clamp(1, MAX_TRANSCRIPT_MESSAGES);
+        let cursor = args
+            .before
+            .as_deref()
+            .map(parse_transcript_cursor)
+            .transpose()?;
 
         // Resolve channel name to ID
         let found = self
@@ -139,9 +163,24 @@ impl Tool for ChannelRecallTool {
         // Load transcript
         let messages = self
             .conversation_logger
-            .load_channel_transcript(&channel.id, limit)
+            .load_channel_transcript(
+                &channel.id,
+                limit,
+                cursor.as_ref().map(|cursor| {
+                    (
+                        cursor.before_unix_seconds,
+                        cursor.before_message_id.as_str(),
+                    )
+                }),
+            )
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to load transcript: {e}")))?;
+
+        let next_cursor = if messages.len() as i64 == limit {
+            messages.first().map(build_transcript_cursor)
+        } else {
+            None
+        };
 
         let transcript: Vec<TranscriptMessage> = messages
             .iter()
@@ -153,7 +192,12 @@ impl Tool for ChannelRecallTool {
             })
             .collect();
 
-        let summary = format_transcript(&channel.display_name, &channel.id, &transcript);
+        let summary = format_transcript(
+            &channel.display_name,
+            &channel.id,
+            &transcript,
+            &next_cursor,
+        );
 
         Ok(ChannelRecallOutput {
             action: "transcript".to_string(),
@@ -161,6 +205,7 @@ impl Tool for ChannelRecallTool {
             channel_name: channel.display_name,
             messages: transcript,
             available_channels: vec![],
+            next_cursor,
             summary,
         })
     }
@@ -191,15 +236,52 @@ impl ChannelRecallTool {
             channel_name: None,
             messages: vec![],
             available_channels: entries,
+            next_cursor: None,
             summary,
         })
     }
+}
+
+fn parse_transcript_cursor(
+    cursor: &str,
+) -> std::result::Result<TranscriptCursor, ChannelRecallError> {
+    let Some((unix_seconds, message_id)) = cursor.split_once(CURSOR_SEPARATOR) else {
+        return Err(ChannelRecallError(format!(
+            "Invalid `before` cursor format. Expected `<unix_seconds>{CURSOR_SEPARATOR}<message_id>`."
+        )));
+    };
+
+    let before_unix_seconds = unix_seconds.parse::<i64>().map_err(|_| {
+        ChannelRecallError(
+            "Invalid `before` cursor format. Unix timestamp must be an integer.".to_string(),
+        )
+    })?;
+
+    if message_id.is_empty() {
+        return Err(ChannelRecallError(
+            "Invalid `before` cursor format. Missing message ID.".to_string(),
+        ));
+    }
+
+    Ok(TranscriptCursor {
+        before_unix_seconds,
+        before_message_id: message_id.to_string(),
+    })
+}
+
+fn build_transcript_cursor(message: &crate::conversation::history::ConversationMessage) -> String {
+    format!(
+        "{}{CURSOR_SEPARATOR}{}",
+        message.created_at.timestamp(),
+        message.id
+    )
 }
 
 fn format_transcript(
     channel_name: &Option<String>,
     channel_id: &str,
     messages: &[TranscriptMessage],
+    next_cursor: &Option<String>,
 ) -> String {
     if messages.is_empty() {
         return format!(
@@ -222,6 +304,13 @@ fn format_transcript(
         output.push_str(&format!(
             "**{}** ({}): {}\n\n",
             sender, message.role, message.content
+        ));
+    }
+
+    if let Some(cursor) = next_cursor {
+        output.push_str(&format!(
+            "Use `before: \"{}\"` on your next `channel_recall` call to fetch older messages.\n",
+            cursor
         ));
     }
 

@@ -133,24 +133,49 @@ impl ConversationLogger {
         Ok(messages)
     }
 
-    /// Load recent messages from any channel (not just the current one).
+    /// Load transcript messages from any channel (not just the current one).
+    ///
+    /// Results are returned in chronological order (oldest first). When
+    /// `before` is provided, only messages older than the cursor are returned,
+    /// enabling stable pagination.
     pub async fn load_channel_transcript(
         &self,
         channel_id: &str,
         limit: i64,
+        before: Option<(i64, &str)>,
     ) -> crate::error::Result<Vec<ConversationMessage>> {
-        let rows = sqlx::query(
-            "SELECT id, channel_id, role, sender_name, sender_id, content, metadata, created_at \
-             FROM conversation_messages \
-             WHERE channel_id = ? \
-             ORDER BY created_at DESC \
-             LIMIT ?",
-        )
-        .bind(channel_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        let rows = if let Some((before_unix_seconds, before_message_id)) = before {
+            sqlx::query(
+                "SELECT id, channel_id, role, sender_name, sender_id, content, metadata, created_at \
+                 FROM conversation_messages \
+                 WHERE channel_id = ? \
+                   AND (unixepoch(created_at) < ? \
+                        OR (unixepoch(created_at) = ? AND id < ?)) \
+                 ORDER BY unixepoch(created_at) DESC, id DESC \
+                 LIMIT ?",
+            )
+            .bind(channel_id)
+            .bind(before_unix_seconds)
+            .bind(before_unix_seconds)
+            .bind(before_message_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+        } else {
+            sqlx::query(
+                "SELECT id, channel_id, role, sender_name, sender_id, content, metadata, created_at \
+                 FROM conversation_messages \
+                 WHERE channel_id = ? \
+                 ORDER BY unixepoch(created_at) DESC, id DESC \
+                 LIMIT ?",
+            )
+            .bind(channel_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+        };
 
         let mut messages: Vec<ConversationMessage> = rows
             .into_iter()

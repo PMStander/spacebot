@@ -4,8 +4,8 @@
 //! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
 //! ref system for LLM-friendly element addressing.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::config::BrowserConfig;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::ScreenshotParams;
@@ -31,9 +31,8 @@ use tokio::task::JoinHandle;
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
 /// to prevent server-side request forgery.
 fn validate_url(url: &str) -> Result<(), BrowserError> {
-    let parsed = url::Url::parse(url).map_err(|error| {
-        BrowserError::new(format!("invalid URL '{url}': {error}"))
-    })?;
+    let parsed = url::Url::parse(url)
+        .map_err(|error| BrowserError::new(format!("invalid URL '{url}': {error}")))?;
 
     match parsed.scheme() {
         "http" | "https" => {}
@@ -91,7 +90,7 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
             || v4.is_link_local()                         // 169.254.0.0/16
             || v4.is_broadcast()                          // 255.255.255.255
             || v4.is_unspecified()                        // 0.0.0.0
-            || is_v4_cgnat(v4)                            // 100.64.0.0/10
+            || is_v4_cgnat(v4) // 100.64.0.0/10
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()                             // ::1
