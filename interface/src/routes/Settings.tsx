@@ -1,14 +1,15 @@
-import {useState, useEffect, useRef} from "react";
-import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
-import {api, type GlobalSettingsResponse} from "@/api/client";
-import {Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle} from "@/ui";
-import {useSearch, useNavigate} from "@tanstack/react-router";
-import {ChannelSettingCard, DisabledChannelCard} from "@/components/ChannelSettingCard";
-import {ProviderIcon} from "@/lib/providerIcons";
-import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
-import {faSearch} from "@fortawesome/free-solid-svg-icons";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type GlobalSettingsResponse } from "@/api/client";
+import { Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
+import { useSearch, useNavigate } from "@tanstack/react-router";
+import { ChannelSettingCard, DisabledChannelCard } from "@/components/ChannelSettingCard";
+import { ModelSelect } from "@/components/ModelSelect";
+import { ProviderIcon } from "@/lib/providerIcons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
-import {parse as parseToml} from "smol-toml";
+import { parse as parseToml } from "smol-toml";
 
 type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
 
@@ -193,6 +194,14 @@ const PROVIDERS = [
 		defaultModel: "MiniMax-M1-80k",
 	},
 	{
+		id: "minimax-cn",
+		name: "MiniMax CN",
+		description: "MiniMax M2.5 (Anthropic message format)",
+		placeholder: "eyJ...",
+		envVar: "MINIMAX_CN_API_KEY",
+		defaultModel: "minimax-cn/MiniMax-M2.5",
+	},
+	{
 		id: "moonshot",
 		name: "Moonshot AI",
 		description: "Kimi models (Kimi K2, Kimi K2.5)",
@@ -212,7 +221,7 @@ const PROVIDERS = [
 export function Settings() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const search = useSearch({from: "/settings"}) as {tab?: string};
+	const search = useSearch({ from: "/settings" }) as { tab?: string };
 	const [activeSection, setActiveSection] = useState<SectionId>("providers");
 
 	// Sync activeSection with URL search param
@@ -224,17 +233,20 @@ export function Settings() {
 
 	const handleSectionChange = (section: SectionId) => {
 		setActiveSection(section);
-		navigate({to: "/settings", search: {tab: section}});
+		navigate({ to: "/settings", search: { tab: section } });
 	};
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
 	const [keyInput, setKeyInput] = useState("");
+	const [modelInput, setModelInput] = useState("");
+	const [testedSignature, setTestedSignature] = useState<string | null>(null);
+	const [testResult, setTestResult] = useState<{ success: boolean; message: string; sample?: string } | null>(null);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
 	} | null>(null);
 
 	// Fetch providers data (only when on providers tab)
-	const {data, isLoading} = useQuery({
+	const { data, isLoading } = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
 		staleTime: 5_000,
@@ -242,7 +254,7 @@ export function Settings() {
 	});
 
 	// Fetch global settings (only when on api-keys, server, or worker-logs tabs)
-	const {data: globalSettings, isLoading: globalSettingsLoading} = useQuery({
+	const { data: globalSettings, isLoading: globalSettingsLoading } = useQuery({
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
@@ -250,53 +262,102 @@ export function Settings() {
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: ({provider, apiKey}: {provider: string; apiKey: string}) =>
-			api.updateProvider(provider, apiKey),
+		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
+			api.updateProvider(provider, apiKey, model),
 		onSuccess: (result) => {
 			if (result.success) {
 				setEditingProvider(null);
 				setKeyInput("");
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["providers"]});
+				setModelInput("");
+				setTestedSignature(null);
+				setTestResult(null);
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
 				// Agents will auto-start on the backend, refetch agent list after a short delay
 				setTimeout(() => {
-					queryClient.invalidateQueries({queryKey: ["agents"]});
-					queryClient.invalidateQueries({queryKey: ["overview"]});
+					queryClient.invalidateQueries({ queryKey: ["agents"] });
+					queryClient.invalidateQueries({ queryKey: ["overview"] });
 				}, 3000);
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
+
+	const testModelMutation = useMutation({
+		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
+			api.testProviderModel(provider, apiKey, model),
+	});
+
 
 	const removeMutation = useMutation({
 		mutationFn: (provider: string) => api.removeProvider(provider),
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["providers"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const editingProviderData = PROVIDERS.find((p) => p.id === editingProvider);
 
-	const handleSave = () => {
-		if (!keyInput.trim() || !editingProvider) return;
-		updateMutation.mutate({provider: editingProvider, apiKey: keyInput.trim()});
+	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${modelInput.trim()}`;
+
+	const handleTestModel = async (): Promise<boolean> => {
+		if (!editingProvider || !keyInput.trim() || !modelInput.trim()) return false;
+		setMessage(null);
+		setTestResult(null);
+		try {
+			const result = await testModelMutation.mutateAsync({
+				provider: editingProvider,
+				apiKey: keyInput.trim(),
+				model: modelInput.trim(),
+			});
+			setTestResult({ success: result.success, message: result.message, sample: result.sample });
+			if (result.success) {
+				setTestedSignature(currentSignature);
+				return true;
+			} else {
+				setTestedSignature(null);
+				return false;
+			}
+		} catch (error: any) {
+			setTestResult({ success: false, message: `Failed: ${error.message}` });
+			setTestedSignature(null);
+			return false;
+		}
+	};
+
+	const handleSave = async () => {
+		if (!keyInput.trim() || !editingProvider || !modelInput.trim()) return;
+
+		if (testedSignature !== currentSignature) {
+			const testPassed = await handleTestModel();
+			if (!testPassed) return;
+		}
+
+		updateMutation.mutate({
+			provider: editingProvider,
+			apiKey: keyInput.trim(),
+			model: modelInput.trim(),
+		});
 	};
 
 	const handleClose = () => {
 		setEditingProvider(null);
 		setKeyInput("");
+		setModelInput("");
+		setTestedSignature(null);
+		setTestResult(null);
 	};
 
 	const isConfigured = (providerId: string): boolean => {
@@ -337,69 +398,71 @@ export function Settings() {
 				</header>
 				<div className="flex-1 overflow-y-auto">
 					{activeSection === "providers" ? (
-					<div className="mx-auto max-w-2xl px-6 py-6">
-						{/* Section header */}
-						<div className="mb-6">
-							<h2 className="font-plex text-sm font-semibold text-ink">
-								LLM Providers
-							</h2>
-							<p className="mt-1 text-sm text-ink-dull">
-								Configure credentials/endpoints for LLM providers. At least one provider is
-								required for agents to function.
-							</p>
-						</div>
-
-						<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
-								To customise which model is used, go to{" "}
-								<span className="text-ink-dull">Agent &gt; Config &gt; Model Routing</span>.
-								{" "}Model routing is configured per agent.
-							</p>
-						</div>
-
-						{isLoading ? (
-							<div className="flex items-center gap-2 text-ink-dull">
-								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-								Loading providers...
+						<div className="mx-auto max-w-2xl px-6 py-6">
+							{/* Section header */}
+							<div className="mb-6">
+								<h2 className="font-plex text-sm font-semibold text-ink">
+									LLM Providers
+								</h2>
+								<p className="mt-1 text-sm text-ink-dull">
+									Configure credentials/endpoints for LLM providers. At least one provider is
+									required for agents to function.
+								</p>
 							</div>
-						) : (
-							<div className="flex flex-col gap-3">
-								{PROVIDERS.map((provider) => (
-									<ProviderCard
-										key={provider.id}
-										provider={provider.id}
-										name={provider.name}
-										description={provider.description}
-										configured={isConfigured(provider.id)}
-										defaultModel={"defaultModel" in provider ? provider.defaultModel : undefined}
-										onEdit={() => {
-											setEditingProvider(provider.id);
-											setKeyInput("");
-											setMessage(null);
-										}}
-										onRemove={() => removeMutation.mutate(provider.id)}
-										removing={removeMutation.isPending}
-									/>
-								))}
-							</div>
-						)}
 
-						{/* Info note */}
-						<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
-								Provider values are written to{" "}
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
-									config.toml
-								</code>{" "}
-								in your instance directory. You can also set them via
-								environment variables (
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
-									ANTHROPIC_API_KEY
-								</code>
-								, etc.).
-							</p>
+							<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+								<p className="text-sm text-ink-faint">
+									When you add a provider, choose a model and run a completion test before saving.
+									Saving applies that model to all five default routing roles and to your default agent.
+								</p>
+							</div>
+
+							{isLoading ? (
+								<div className="flex items-center gap-2 text-ink-dull">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Loading providers...
+								</div>
+							) : (
+								<div className="flex flex-col gap-3">
+									{PROVIDERS.map((provider) => (
+										<ProviderCard
+											key={provider.id}
+											provider={provider.id}
+											name={provider.name}
+											description={provider.description}
+											configured={isConfigured(provider.id)}
+											defaultModel={provider.defaultModel}
+											onEdit={() => {
+												setEditingProvider(provider.id);
+												setKeyInput("");
+												setModelInput(provider.defaultModel ?? "");
+												setTestedSignature(null);
+												setTestResult(null);
+												setMessage(null);
+											}}
+											onRemove={() => removeMutation.mutate(provider.id)}
+											removing={removeMutation.isPending}
+										/>
+									))}
+								</div>
+							)}
+
+							{/* Info note */}
+							<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+								<p className="text-sm text-ink-faint">
+									Provider values are written to{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										config.toml
+									</code>{" "}
+									in your instance directory. You can also set them via
+									environment variables (
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										ANTHROPIC_API_KEY
+									</code>
+									, etc.).
+								</p>
+							</div>
 						</div>
-					</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
 					) : activeSection === "api-keys" ? (
@@ -439,13 +502,49 @@ export function Settings() {
 							if (e.key === "Enter") handleSave();
 						}}
 					/>
-					{message && (
+					<ModelSelect
+						label="Model"
+						description="Pick the exact model ID to verify and apply to routing"
+						value={modelInput}
+						onChange={(value) => {
+							setModelInput(value);
+							setTestedSignature(null);
+						}}
+						provider={editingProvider ?? undefined}
+					/>
+					<div className="flex items-center gap-2">
+						<Button
+							onClick={handleTestModel}
+							disabled={!editingProvider || !keyInput.trim() || !modelInput.trim()}
+							loading={testModelMutation.isPending}
+							variant="outline"
+							size="sm"
+						>
+							Test model
+						</Button>
+						{testedSignature === currentSignature && testResult?.success && (
+							<span className="text-xs text-green-400">Verified</span>
+						)}
+					</div>
+					{testResult && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${
-								message.type === "success"
+							className={`rounded-md border px-3 py-2 text-sm ${testResult.success
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
-							}`}
+								}`}
+						>
+							<div>{testResult.message}</div>
+							{testResult.success && testResult.sample ? (
+								<div className="mt-1 text-xs text-ink-dull">Sample: {testResult.sample}</div>
+							) : null}
+						</div>
+					)}
+					{message && (
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+									? "border-green-500/20 bg-green-500/10 text-green-400"
+									: "border-red-500/20 bg-red-500/10 text-red-400"
+								}`}
 						>
 							{message.text}
 						</div>
@@ -472,28 +571,28 @@ export function Settings() {
 function ChannelsSection() {
 	const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
 
-	const {data: messagingStatus, isLoading} = useQuery({
+	const { data: messagingStatus, isLoading } = useQuery({
 		queryKey: ["messaging-status"],
 		queryFn: api.messagingStatus,
 		staleTime: 5_000,
 	});
 
 	const PLATFORMS = [
-		{platform: "discord" as const, name: "Discord", description: "Discord bot integration"},
-		{platform: "slack" as const, name: "Slack", description: "Slack bot integration"},
-		{platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration"},
-		{platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration"},
-		{platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver"},
+		{ platform: "discord" as const, name: "Discord", description: "Discord bot integration" },
+		{ platform: "slack" as const, name: "Slack", description: "Slack bot integration" },
+		{ platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration" },
+		{ platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration" },
+		{ platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver" },
 	] as const;
 
 	const COMING_SOON = [
-		{platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound"},
-		{platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration"},
-		{platform: "matrix", name: "Matrix", description: "Decentralized chat protocol"},
-		{platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge"},
-		{platform: "irc", name: "IRC", description: "TLS socket connection"},
-		{platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration"},
-		{platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration"},
+		{ platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
+		{ platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration" },
+		{ platform: "matrix", name: "Matrix", description: "Decentralized chat protocol" },
+		{ platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge" },
+		{ platform: "irc", name: "IRC", description: "TLS socket connection" },
+		{ platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration" },
+		{ platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration" },
 	];
 
 	return (
@@ -512,7 +611,7 @@ function ChannelsSection() {
 				</div>
 			) : (
 				<div className="flex flex-col gap-3">
-					{PLATFORMS.map(({platform: p, name: n, description: d}) => (
+					{PLATFORMS.map(({ platform: p, name: n, description: d }) => (
 						<ChannelSettingCard
 							key={p}
 							platform={p}
@@ -523,7 +622,7 @@ function ChannelsSection() {
 							onToggle={() => setExpandedPlatform(expandedPlatform === p ? null : p)}
 						/>
 					))}
-					{COMING_SOON.map(({platform: p, name: n, description: d}) => (
+					{COMING_SOON.map(({ platform: p, name: n, description: d }) => (
 						<DisabledChannelCard key={p} platform={p} name={n} description={d} />
 					))}
 				</div>
@@ -539,7 +638,7 @@ interface GlobalSettingsSectionProps {
 	isLoading: boolean;
 }
 
-function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [editingBraveKey, setEditingBraveKey] = useState(false);
 	const [braveKeyInput, setBraveKeyInput] = useState("");
@@ -551,23 +650,23 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 			if (result.success) {
 				setEditingBraveKey(false);
 				setBraveKeyInput("");
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSaveBraveKey = () => {
-		updateMutation.mutate({brave_search_key: braveKeyInput.trim() || null});
+		updateMutation.mutate({ brave_search_key: braveKeyInput.trim() || null });
 	};
 
 	const handleRemoveBraveKey = () => {
-		updateMutation.mutate({brave_search_key: null});
+		updateMutation.mutate({ brave_search_key: null });
 	};
 
 	return (
@@ -630,11 +729,10 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -677,7 +775,7 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	);
 }
 
-function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function ServerSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [apiEnabled, setApiEnabled] = useState(settings?.api_enabled ?? true);
 	const [apiPort, setApiPort] = useState(settings?.api_port.toString() ?? "19898");
@@ -697,21 +795,21 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success", requiresRestart: result.requires_restart});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success", requiresRestart: result.requires_restart });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
 		const port = parseInt(apiPort, 10);
 		if (isNaN(port) || port < 1024 || port > 65535) {
-			setMessage({text: "Port must be between 1024 and 65535", type: "error"});
+			setMessage({ text: "Port must be between 1024 and 65535", type: "error" });
 			return;
 		}
 
@@ -793,11 +891,10 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 					{message.requiresRestart && (
@@ -811,7 +908,7 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	);
 }
 
-function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function WorkerLogsSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [logMode, setLogMode] = useState(settings?.worker_log_mode ?? "errors_only");
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
@@ -827,19 +924,19 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
-		updateMutation.mutate({worker_log_mode: logMode});
+		updateMutation.mutate({ worker_log_mode: logMode });
 	};
 
 	const modes = [
@@ -880,11 +977,10 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 						{modes.map((mode) => (
 							<div
 								key={mode.value}
-								className={`rounded-lg border p-4 cursor-pointer transition-colors ${
-									logMode === mode.value
+								className={`rounded-lg border p-4 cursor-pointer transition-colors ${logMode === mode.value
 										? "border-accent bg-accent/5"
 										: "border-app-line bg-app-box hover:border-app-line/80"
-								}`}
+									}`}
 								onClick={() => setLogMode(mode.value)}
 							>
 								<label className="flex items-start gap-3 cursor-pointer">
@@ -912,11 +1008,10 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -926,11 +1021,11 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 }
 
 const PERMISSION_OPTIONS = [
-	{value: "allow", label: "Allow", description: "Tool can run without restriction"},
-	{value: "deny", label: "Deny", description: "Tool is completely disabled"},
+	{ value: "allow", label: "Allow", description: "Tool can run without restriction" },
+	{ value: "deny", label: "Deny", description: "Tool is completely disabled" },
 ];
 
-function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.opencode?.enabled ?? false);
 	const [path, setPath] = useState(settings?.opencode?.path ?? "opencode");
@@ -959,31 +1054,31 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
 		const servers = parseInt(maxServers, 10);
 		if (isNaN(servers) || servers < 1) {
-			setMessage({text: "Max servers must be at least 1", type: "error"});
+			setMessage({ text: "Max servers must be at least 1", type: "error" });
 			return;
 		}
 		const timeout = parseInt(startupTimeout, 10);
 		if (isNaN(timeout) || timeout < 1) {
-			setMessage({text: "Startup timeout must be at least 1", type: "error"});
+			setMessage({ text: "Startup timeout must be at least 1", type: "error" });
 			return;
 		}
 		const retries = parseInt(maxRetries, 10);
 		if (isNaN(retries) || retries < 0) {
-			setMessage({text: "Max retries cannot be negative", type: "error"});
+			setMessage({ text: "Max retries cannot be negative", type: "error" });
 			return;
 		}
 
@@ -1105,10 +1200,10 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 								</p>
 								<div className="mt-3 flex flex-col gap-3">
 									{([
-										{label: "File Edit", value: editPerm, setter: setEditPerm},
-										{label: "Shell / Bash", value: bashPerm, setter: setBashPerm},
-										{label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm},
-									] as const).map(({label, value, setter}) => (
+										{ label: "File Edit", value: editPerm, setter: setEditPerm },
+										{ label: "Shell / Bash", value: bashPerm, setter: setBashPerm },
+										{ label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm },
+									] as const).map(({ label, value, setter }) => (
 										<div key={label} className="flex items-center justify-between">
 											<span className="text-sm text-ink">{label}</span>
 											<Select value={value} onValueChange={(v) => setter(v)}>
@@ -1138,11 +1233,10 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -1161,7 +1255,7 @@ function ConfigFileSection() {
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 	const [editorLoaded, setEditorLoaded] = useState(false);
 
-	const {data, isLoading} = useQuery({
+	const { data, isLoading } = useQuery({
 		queryKey: ["raw-config"],
 		queryFn: api.rawConfig,
 		staleTime: 5_000,
@@ -1172,19 +1266,19 @@ function ConfigFileSection() {
 		onSuccess: (result) => {
 			if (result.success) {
 				setOriginalContent(currentContent);
-				setMessage({text: result.message, type: "success"});
+				setMessage({ text: result.message, type: "success" });
 				setValidationError(null);
 				// Invalidate all config-related queries so other tabs pick up changes
-				queryClient.invalidateQueries({queryKey: ["providers"]});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
-				queryClient.invalidateQueries({queryKey: ["agents"]});
-				queryClient.invalidateQueries({queryKey: ["overview"]});
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
+				queryClient.invalidateQueries({ queryKey: ["agents"] });
+				queryClient.invalidateQueries({ queryKey: ["overview"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
@@ -1301,7 +1395,7 @@ function ConfigFileSection() {
 		if (!viewRef.current) return;
 		const view = viewRef.current;
 		view.dispatch({
-			changes: {from: 0, to: view.state.doc.length, insert: originalContent},
+			changes: { from: 0, to: view.state.doc.length, insert: originalContent },
 		});
 		setCurrentContent(originalContent);
 		setValidationError(null);
@@ -1334,13 +1428,12 @@ function ConfigFileSection() {
 
 			{/* Validation / status bar */}
 			{(validationError || message) && (
-				<div className={`border-b px-6 py-2 text-sm ${
-					validationError
+				<div className={`border-b px-6 py-2 text-sm ${validationError
 						? "border-red-500/20 bg-red-500/5 text-red-400"
 						: message?.type === "success"
 							? "border-green-500/20 bg-green-500/5 text-green-400"
 							: "border-red-500/20 bg-red-500/5 text-red-400"
-				}`}>
+					}`}>
 					{validationError ? `Syntax error: ${validationError}` : message?.text}
 				</div>
 			)}
