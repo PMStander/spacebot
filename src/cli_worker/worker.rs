@@ -95,7 +95,7 @@ impl CliWorker {
             .kill_on_drop(true);
 
         // Scrub secret environment variables from inherited environment
-        for var in crate::tools::shell::SECRET_ENV_VARS {
+        for var in ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "XAI_API_KEY", "GITHUB_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "TWITCH_OAUTH_TOKEN"] {
             command.env_remove(var);
         }
 

@@ -2,7 +2,7 @@
 
 use super::state::ApiState;
 use super::{
-    agents, artifacts, avatar, bindings, canvas, channels, config, cortex, cron, ingest, local_file, mcp,
+    agents, artifacts, avatar, bindings, canvas, channels, config, cortex, cron, ingest, links, local_file, mcp,
     memories, messaging, models, providers, settings, skills, system, webchat, workers,
 };
 
@@ -61,6 +61,7 @@ pub async fn start_http_server(
             "/agents",
             get(agents::list_agents)
                 .post(agents::create_agent)
+                .put(agents::update_agent)
                 .delete(agents::delete_agent),
         )
         .route("/agents/mcp", get(agents::list_agent_mcp))
@@ -147,10 +148,6 @@ pub async fn start_http_server(
             "/providers/openai/oauth/browser/status",
             get(providers::openai_browser_oauth_status),
         )
-        .route(
-            "/providers/openai/oauth/browser/callback",
-            get(providers::openai_browser_oauth_callback),
-        )
         .route("/providers/test", post(providers::test_provider_model))
         .route("/providers/{provider}", delete(providers::delete_provider))
         .route("/models", get(models::get_models))
@@ -201,6 +198,23 @@ pub async fn start_http_server(
             get(avatar::get_avatar).post(avatar::upload_avatar),
         )
         .route("/local-file", get(local_file::serve_local_file))
+        .route("/links", get(links::list_links).post(links::create_link))
+        .route(
+            "/links/{from}/{to}",
+            put(links::update_link).delete(links::delete_link),
+        )
+        .route("/agents/{id}/links", get(links::agent_links))
+        .route("/topology", get(links::topology))
+        .route("/groups", get(links::list_groups).post(links::create_group))
+        .route(
+            "/groups/{name}",
+            put(links::update_group).delete(links::delete_group),
+        )
+        .route("/humans", get(links::list_humans).post(links::create_human))
+        .route(
+            "/humans/{id}",
+            put(links::update_human).delete(links::delete_human),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),

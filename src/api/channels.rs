@@ -19,11 +19,7 @@ pub(super) struct RenameChannelRequest {
     display_name: String,
 }
 
-#[derive(Deserialize)]
-pub(super) struct DeleteChannelQuery {
-    agent_id: String,
-    channel_id: String,
-}
+
 
 #[derive(Deserialize)]
 pub(super) struct CreateChannelRequest {
@@ -255,7 +251,13 @@ pub(super) async fn rename_channel(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// Delete an internal channel and all its messages.
+#[derive(Deserialize)]
+pub(super) struct DeleteChannelQuery {
+    agent_id: String,
+    channel_id: String,
+}
+
+/// Delete a channel and its message history.
 /// Agent memories derived from the channel are preserved.
 pub(super) async fn delete_channel(
     State(state): State<Arc<ApiState>>,
@@ -269,55 +271,25 @@ pub(super) async fn delete_channel(
     }
 
     let pools = state.agent_pools.load();
-    let pool = pools
-        .get(&query.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?
-        .clone();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = ChannelStore::new(pool.clone());
 
-    // Verify it exists and is internal before deleting
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM channels WHERE id = ? AND platform = 'internal')",
-    )
-    .bind(&query.channel_id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deleted = store.delete(&query.channel_id).await.map_err(|error| {
+        tracing::error!(%error, "failed to delete channel");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    if !exists {
+    if !deleted {
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Delete all channel-scoped data; memories are agent-scoped and preserved
-    sqlx::query("DELETE FROM conversation_messages WHERE channel_id = ?")
-        .bind(&query.channel_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM branch_runs WHERE channel_id = ?")
-        .bind(&query.channel_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM worker_runs WHERE channel_id = ?")
-        .bind(&query.channel_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM artifacts WHERE channel_id = ?")
-        .bind(&query.channel_id)
-        .execute(&pool)
-        .await
-        .ok();
-    sqlx::query("DELETE FROM channels WHERE id = ?")
-        .bind(&query.channel_id)
-        .execute(&pool)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, channel_id = %query.channel_id, "failed to delete channel");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    tracing::info!(
+        agent_id = %query.agent_id,
+        channel_id = %query.channel_id,
+        "channel deleted via API"
+    );
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({ "success": true })))
 }
 
 /// Cancel a running worker or branch via the API.

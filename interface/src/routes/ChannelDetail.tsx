@@ -228,7 +228,7 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId, onOpenArtif
 						<span className={`text-sm font-medium ${
 							item.role === "user" ? "text-accent-faint" : "text-green-400"
 						}`}>
-							{item.role === "user" ? (item.sender_name ?? "user") : "bot"}
+							{item.role === "user" ? (item.sender_name ?? "user") : (item.sender_name ?? "bot")}
 						</span>
 						<div className="mt-0.5 text-sm text-ink-dull">
 							<Markdown>{item.content}</Markdown>

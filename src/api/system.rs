@@ -130,6 +130,8 @@ pub(super) async fn events_sse(
                             ApiEvent::CanvasRemoved { .. } => "canvas_removed",
                             ApiEvent::ArtifactCreated { .. } => "artifact_created",
                             ApiEvent::ConfigReloaded => "config_reloaded",
+                            ApiEvent::AgentMessageSent { .. } => "agent_message_sent",
+                            ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

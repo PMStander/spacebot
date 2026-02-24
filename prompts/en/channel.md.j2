@@ -116,6 +116,14 @@ Panels are self-contained HTML rendered in sandboxed iframes. Use dark theme (da
 {{ available_channels }}
 {%- endif %}
 
+{%- if org_context %}
+{{ org_context }}
+{%- endif %}
+
+{%- if link_context %}
+{{ link_context }}
+{%- endif %}
+
 {%- if conversation_context %}
 ## Conversation Context
 

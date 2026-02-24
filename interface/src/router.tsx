@@ -125,8 +125,8 @@ const indexRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/",
 	component: function IndexPage() {
-		const {liveStates} = useLiveContext();
-		return <Overview liveStates={liveStates} />;
+		const {liveStates, activeLinks} = useLiveContext();
+		return <Overview liveStates={liveStates} activeLinks={activeLinks} />;
 	},
 });
 

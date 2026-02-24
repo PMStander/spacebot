@@ -206,6 +206,7 @@ impl Worker {
             self.deps.sqlite_pool.clone(),
             self.deps.api_event_tx.clone(),
             self.deps.document_search.clone(),
+            self.deps.sandbox.clone(),
             mcp_tools,
             self.deps.runtime_config.clone(),
         );

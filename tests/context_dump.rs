@@ -70,6 +70,16 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox = Arc::new(
+        spacebot::sandbox::Sandbox::new(
+            &agent_config.sandbox,
+            agent_config.workspace.clone(),
+            &config.instance_dir,
+            agent_config.data_dir.clone(),
+        )
+        .await,
+    );
+
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
@@ -82,6 +92,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
         document_search: None,
+        sandbox,
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        agent_names: Arc::new(std::collections::HashMap::new()),
     };
 
     Ok((deps, config))
@@ -207,6 +220,11 @@ async fn dump_channel_context() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -326,6 +344,7 @@ async fn dump_worker_context() {
         deps.sqlite_pool.clone(),
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );
@@ -422,6 +441,11 @@ async fn dump_all_contexts() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -480,6 +504,7 @@ async fn dump_all_contexts() {
         deps.sqlite_pool.clone(),
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );
