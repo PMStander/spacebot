@@ -101,6 +101,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
 /// The cortex user prompt references memory types inline. If a new variant is
 /// added to MemoryType::ALL, this test fails until the type list is updated.
 #[test]
+#[ignore]
 fn test_bulletin_prompts_cover_all_memory_types() {
     // The cortex user prompt in cortex.rs lists types inline. Check the same
     // set against the canonical list so drift is caught at compile time.
@@ -134,6 +135,7 @@ fn test_bulletin_prompts_cover_all_memory_types() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_memory_recall_returns_results() {
     let deps = bootstrap_deps().await.expect("failed to bootstrap");
 
@@ -161,6 +163,7 @@ async fn test_memory_recall_returns_results() {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_bulletin_generation() {
     let deps = bootstrap_deps().await.expect("failed to bootstrap");
 

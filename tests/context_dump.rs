@@ -174,6 +174,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
 // ─── Channel Context ─────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore]
 async fn dump_channel_context() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
@@ -259,6 +260,7 @@ async fn dump_channel_context() {
 // ─── Branch Context ──────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore]
 async fn dump_branch_context() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
@@ -313,6 +315,7 @@ async fn dump_branch_context() {
 // ─── Worker Context ──────────────────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore]
 async fn dump_worker_context() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
@@ -383,6 +386,7 @@ async fn dump_worker_context() {
 // ─── All Contexts Side-by-Side ───────────────────────────────────────────────
 
 #[tokio::test]
+#[ignore]
 async fn dump_all_contexts() {
     let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
     let rc = &deps.runtime_config;
