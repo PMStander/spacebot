@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { api, type WebChatAttachmentRef } from "@/api/client";
+import { useWebChatStore } from "./useWebChatStore";
 
 export interface ToolActivity {
 	tool: string;
@@ -52,21 +53,24 @@ async function consumeSSE(
 }
 
 export function useWebChat(agentId: string) {
-	const [sessionId, setSessionId] = useState(() => getPortalChatSessionId(agentId));
+	const { getChat, initChat, updateChat, clearChat: storeClearChat } = useWebChatStore();
+	const defaultSessionId = getPortalChatSessionId(agentId);
+	
+	useEffect(() => {
+		initChat(agentId, defaultSessionId);
+	}, [agentId, defaultSessionId, initChat]);
 
-	const [prevAgentId, setPrevAgentId] = useState(agentId);
-	if (agentId !== prevAgentId) {
-		setPrevAgentId(agentId);
-		setSessionId(getPortalChatSessionId(agentId));
-	}
-	const [messages, setMessages] = useState<WebChatMessage[]>([]);
-	const [isStreaming, setIsStreaming] = useState(false);
-	const [error, setError] = useState<string | null>(null);
-	const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
-	const streamingTextRef = useRef("");
+	const chatState = getChat(agentId, defaultSessionId);
+	const { sessionId, messages, isStreaming, error, toolActivity, streamingText, hasFetched } = chatState;
+
+	const streamingTextRef = useRef(streamingText);
+	useEffect(() => {
+		streamingTextRef.current = streamingText;
+	}, [streamingText]);
 
 	useEffect(() => {
 		let cancelled = false;
+		if (hasFetched) return;
 		(async () => {
 			try {
 				// Log the fetch attempt
@@ -77,27 +81,27 @@ export function useWebChat(agentId: string) {
 				if (cancelled) return;
 				// Log the result
 				console.log("Got history", history);
-				setMessages(
-					history.map((m) => ({
+				updateChat(agentId, () => ({
+					messages: history.map((m) => ({
 						id: m.id,
 						role: m.role as "user" | "assistant",
 						content: m.content || "[attachment]",
 					})),
-				);
+					hasFetched: true,
+				}));
 			} catch (err) {
 				console.error("Failed to fetch history:", err);
+				updateChat(agentId, () => ({ hasFetched: true }));
 			}
 		})();
 		return () => { cancelled = true; };
-	}, [agentId, sessionId]);
+	}, [agentId, sessionId, hasFetched, updateChat]);
 
-	const sendMessage = useCallback(async (text: string, attachments: WebChatAttachmentRef[] = []) => {
+	const sendMessage = useCallback(async (text: string, attachments: WebChatAttachmentRef[ ] = []) => {
 		if (isStreaming) return;
 		if (!text.trim() && attachments.length === 0) return;
 
-		setError(null);
-		setIsStreaming(true);
-		setToolActivity([]);
+		updateChat(agentId, () => ({ error: null, isStreaming: true, toolActivity: [], streamingText: "" }));
 		streamingTextRef.current = "";
 
 		const contentParts: string[] = [];
@@ -114,7 +118,7 @@ export function useWebChat(agentId: string) {
 			role: "user",
 			content: contentParts.join("\n"),
 		};
-		setMessages((prev) => [...prev, userMessage]);
+		updateChat(agentId, (state) => ({ messages: [...state.messages, userMessage] }));
 
 		const assistantId = `assistant-${Date.now()}`;
 
@@ -128,35 +132,35 @@ export function useWebChat(agentId: string) {
 				if (eventType === "tool_started") {
 					try {
 						const parsed = JSON.parse(data);
-						setToolActivity((prev) => [
-							...prev,
-							{ tool: parsed.ToolStarted?.tool_name ?? "tool", status: "running" },
-						]);
+						updateChat(agentId, (state) => ({
+							toolActivity: [
+								...state.toolActivity,
+							 { tool: parsed.ToolStarted?.tool_name ?? "tool", status: "running" },
+							]
+						}));
 					} catch { /* ignore */ }
 				} else if (eventType === "tool_completed") {
 					try {
 						const parsed = JSON.parse(data);
 						const toolName = parsed.ToolCompleted?.tool_name ?? "tool";
-						setToolActivity((prev) =>
-							prev.map((t) =>
+						updateChat(agentId, (state) => ({
+							toolActivity: state.toolActivity.map((t) =>
 								t.tool === toolName && t.status === "running"
 									? { ...t, status: "done" }
-									: t,
-							),
-						);
+									: t
+							)
+						}));
 					} catch { /* ignore */ }
 				} else if (eventType === "text") {
 					try {
 						const parsed = JSON.parse(data);
 						const content = parsed.Text ?? "";
-						setMessages((prev) => {
-							const existing = prev.find((m) => m.id === assistantId);
+						updateChat(agentId, (state) => {
+							const existing = state.messages.find((m) => m.id === assistantId);
 							if (existing) {
-								return prev.map((m) =>
-									m.id === assistantId ? { ...m, content } : m,
-								);
+								return { messages: state.messages.map((m) => m.id === assistantId ? { ...m, content } : m) };
 							}
-							return [...prev, { id: assistantId, role: "assistant", content }];
+							return { messages: [...state.messages, { id: assistantId, role: "assistant", content }] };
 						});
 					} catch { /* ignore */ }
 				} else if (eventType === "stream_chunk") {
@@ -165,33 +169,27 @@ export function useWebChat(agentId: string) {
 						const chunk = parsed.StreamChunk ?? "";
 						streamingTextRef.current += chunk;
 						const accumulated = streamingTextRef.current;
-						setMessages((prev) => {
-							const existing = prev.find((m) => m.id === assistantId);
+						updateChat(agentId, (state) => {
+							const existing = state.messages.find((m) => m.id === assistantId);
 							if (existing) {
-								return prev.map((m) =>
-									m.id === assistantId ? { ...m, content: accumulated } : m,
-								);
+								return { messages: state.messages.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m), streamingText: accumulated };
 							}
-							return [...prev, { id: assistantId, role: "assistant", content: accumulated }];
+							return { messages: [...state.messages, { id: assistantId, role: "assistant", content: accumulated }], streamingText: accumulated };
 						});
 					} catch { /* ignore */ }
 				}
 			});
 		} catch (error) {
-			setError(error instanceof Error ? error.message : "Request failed");
+			updateChat(agentId, () => ({ error: error instanceof Error ? error.message : "Request failed" }));
 		} finally {
-			setIsStreaming(false);
-			setToolActivity([]);
+			updateChat(agentId, () => ({ isStreaming: false, toolActivity: [] }));
 		}
-	}, [agentId, sessionId, isStreaming]);
+	}, [agentId, sessionId, isStreaming, updateChat]);
 
 	const clearChat = useCallback(() => {
 		const newSessionId = `portal:chat:${agentId}:${Date.now()}`;
-		setSessionId(newSessionId);
-		setMessages([]);
-		setError(null);
-		setToolActivity([]);
-	}, [agentId]);
+		storeClearChat(agentId, newSessionId);
+	}, [agentId, storeClearChat]);
 
 	return { messages, sessionId, isStreaming, error, toolActivity, sendMessage, clearChat };
 }

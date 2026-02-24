@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useWebChat, getPortalChatSessionId, type ToolActivity } from "@/hooks/useWebChat";
+import { useWebChat, type ToolActivity } from "@/hooks/useWebChat";
 import { api, type WebChatAttachmentRef } from "@/api/client";
 import type { ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useLiveContext } from "@/hooks/useLiveContext";

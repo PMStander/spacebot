@@ -192,7 +192,9 @@ export function useCortexChat(
 				id: `user-${Date.now()}`,
 				role: "user",
 				content: text,
-				attachments: attachments.length > 0 ? attachments : undefined,
+				thread_id: threadId || "",
+				channel_context: channelId || null,
+				created_at: new Date().toISOString()
 			};
 			setMessages((prev) => [...prev, userMessage]);
 
@@ -259,7 +261,7 @@ export function useCortexChat(
 										m.id === assistantId ? { ...m, content } : m,
 									);
 								}
-								return [...prev, { id: assistantId, role: "assistant", content }];
+								return [...prev, { id: assistantId, role: "assistant", content, thread_id: threadId || "", channel_context: channelId || null, created_at: new Date().toISOString() }];
 							});
 						} catch {
 							/* ignore */
@@ -283,6 +285,9 @@ export function useCortexChat(
 										id: assistantId,
 										role: "assistant",
 										content: currentAssistantMessage,
+										thread_id: threadId || "",
+										channel_context: channelId || null,
+										created_at: new Date().toISOString(),
 									},
 								];
 							});
@@ -356,7 +361,7 @@ export function useCortexChat(
 	}, []);
 
 	// Stub for spawnWorker to match panel expectations if not fully implemented in the hook
-	const spawnWorker = useCallback((task: string) => {
+	const spawnWorker = useCallback((_task: string) => {
 		console.warn("spawnWorker not implemented directly in useCortexChat");
 	}, []);
 
