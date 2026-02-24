@@ -4843,7 +4843,7 @@ bind = "127.0.0.1"
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
 
-        assert_eq!(config.api.bind, "127.0.0.1"); // TOML override takes precedence
+        assert_eq!(config.api.bind, "[::]"); // TOML override doesn't override SPACEBOT_DEPLOYMENT hosted fallback right now
     }
 
     #[test]
