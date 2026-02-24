@@ -1,12 +1,21 @@
 /target
+src-tauri/target/
+src-tauri/gen/
+node_modules/
 .DS_Store
 .fastembed_cache
+*.log
+.env*
+!.envrc
 
 # Interface
 interface/node_modules/
 interface/dist/
+dist/
+build/
 
 .idea
+.vscode
 list/
 agents/
 

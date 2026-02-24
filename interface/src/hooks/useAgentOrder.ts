@@ -2,6 +2,20 @@ import { useState, useEffect } from "react";
 
 const STORAGE_KEY = "spacebot:agent-order";
 
+function arraysEqual(left: string[], right: string[]): boolean {
+	if (left.length !== right.length) {
+		return false;
+	}
+
+	for (let index = 0; index < left.length; index += 1) {
+		if (left[index] !== right[index]) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /**
  * Hook to manage persistent agent ordering via localStorage.
  * Preserves user's custom sort order across sessions.
@@ -26,8 +40,11 @@ export function useAgentOrder(agentIds: string[]) {
 		const storedSet = new Set(storedOrder);
 		const newAgents = agentIds.filter((id) => !storedSet.has(id));
 		const validStoredOrder = storedOrder.filter((id) => agentIds.includes(id));
-		
-		setOrder([...validStoredOrder, ...newAgents]);
+
+		const nextOrder = [...validStoredOrder, ...newAgents];
+		setOrder((currentOrder) =>
+			arraysEqual(currentOrder, nextOrder) ? currentOrder : nextOrder
+		);
 	}, [agentIds]);
 
 	// Persist order to localStorage

@@ -37,6 +37,11 @@ pub async fn initialize_document_search(
     let indexer = DocumentIndexer::new(table.clone(), embedding_model.clone(), config.clone());
     let stats = indexer.index_workspace(workspace_root).await?;
 
+    // Compact files and prune old versions to prevent unbounded growth.
+    // Each delete + append during indexing creates a new lance version;
+    // without this, version count grows on every restart.
+    table.optimize().await?;
+
     let search = Arc::new(DocumentSearch::new(table, embedding_model, config));
     Ok((search, stats))
 }

@@ -132,7 +132,17 @@ fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Start { foreground: false });
+
+    // When launched as a macOS .app bundle, default to foreground mode so the
+    // process stays alive (daemonize forks and the parent exits, which macOS
+    // interprets as the app quitting).
+    let inside_app_bundle = std::env::current_exe()
+        .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
+        .unwrap_or(false);
+
+    let command = cli
+        .command
+        .unwrap_or(Command::Start { foreground: inside_app_bundle });
 
     match command {
         Command::Start { foreground } => cmd_start(cli.config, cli.debug, foreground),
@@ -1296,7 +1306,9 @@ async fn initialize_agents(
         tracing::info!(
             agent = %agent_config.id,
             indexed = document_index_stats.indexed,
+            skipped = document_index_stats.skipped,
             failed = document_index_stats.failed,
+            chunks = document_index_stats.chunks_created,
             discovered = document_index_stats.total_discovered,
             "document vector indexing complete"
         );
@@ -1656,20 +1668,6 @@ async fn initialize_agents(
             let conversation_logger =
                 spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone());
             let channel_store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
-            let tool_server = spacebot::tools::create_cortex_chat_tool_server(
-                agent.deps.memory_search.clone(),
-                conversation_logger,
-                channel_store,
-                browser_config,
-                agent.config.screenshot_dir(),
-                brave_search_key,
-                agent.deps.runtime_config.workspace_dir.clone(),
-                agent.deps.runtime_config.instance_dir.clone(),
-                agent.db.sqlite.clone(),
-                agent_id.to_string(),
-                api_state.event_tx.clone(),
-                agent.deps.document_search.clone(),
-            );
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
 
             // Create a dedicated "Cortex Workers" internal channel for background workers
@@ -1714,6 +1712,23 @@ async fn initialize_agents(
                 logs_dir: agent.config.logs_dir(),
                 reply_target_message_id: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             };
+
+            // Build tool server WITH spawn_worker tool now that channel state exists
+            let tool_server = spacebot::tools::create_cortex_chat_tool_server(
+                agent.deps.memory_search.clone(),
+                conversation_logger,
+                channel_store,
+                browser_config,
+                agent.config.screenshot_dir(),
+                brave_search_key,
+                agent.deps.runtime_config.workspace_dir.clone(),
+                agent.deps.runtime_config.instance_dir.clone(),
+                agent.db.sqlite.clone(),
+                agent_id.to_string(),
+                api_state.event_tx.clone(),
+                agent.deps.document_search.clone(),
+                Some(worker_channel_state.clone()),
+            );
 
             // Register with ApiState so the channel appears in the sidebar
             api_state

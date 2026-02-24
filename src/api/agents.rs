@@ -85,6 +85,7 @@ pub(super) struct InstanceOverviewResponse {
 #[derive(Serialize)]
 struct AgentSummary {
     id: String,
+    group: Option<String>,
     channel_count: usize,
     memory_total: i64,
     cron_job_count: usize,
@@ -586,7 +587,9 @@ pub(super) async fn create_agent(
     tracing::info!(
         agent_id = %agent_id,
         indexed = document_index_stats.indexed,
+        skipped = document_index_stats.skipped,
         failed = document_index_stats.failed,
+        chunks = document_index_stats.chunks_created,
         discovered = document_index_stats.total_discovered,
         "document vector indexing complete"
     );
@@ -709,6 +712,7 @@ pub(super) async fn create_agent(
         agent_id.clone(),
         state.event_tx.clone(),
         Some(document_search),
+        None, // Workers added later via CortexChatSession
     );
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
@@ -1179,10 +1183,65 @@ pub(super) async fn instance_overview(
             .unwrap_or_default();
         let last_bulletin_at = bulletin_events.first().map(|e| e.created_at.clone());
 
-        let profile = crate::agent::cortex::load_profile(pool, &agent_id).await;
+        let mut profile = crate::agent::cortex::load_profile(pool, &agent_id).await;
+
+        // If avatar_path is not set in DB, check if it exists on disk in the agent's data or workspace dir.
+        if let Some(ref mut p) = profile {
+            if p.avatar_path.is_none() {
+                let instance_dir = state.instance_dir.load();
+                let agent_dir = instance_dir.join("agents").join(&agent_id);
+                let data_dir = agent_dir.join("data");
+                let workspace_dir = agent_dir.join("workspace");
+                
+                let mut found_path = None;
+                for dir in &[data_dir, workspace_dir] {
+                    for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
+                        let path = dir.join(format!("avatar.{}", ext));
+                        if path.exists() {
+                            found_path = Some(path.to_string_lossy().to_string());
+                            break;
+                        }
+                    }
+                    if found_path.is_some() { break; }
+                }
+                p.avatar_path = found_path;
+            }
+        } else {
+            // If no profile exists at all, but an avatar does, create a minimal profile.
+            let instance_dir = state.instance_dir.load();
+            let agent_dir = instance_dir.join("agents").join(&agent_id);
+            let data_dir = agent_dir.join("data");
+            let workspace_dir = agent_dir.join("workspace");
+
+            let mut found_path = None;
+            for dir in &[data_dir, workspace_dir] {
+                for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
+                    let path = dir.join(format!("avatar.{}", ext));
+                    if path.exists() {
+                        found_path = Some(path.to_string_lossy().to_string());
+                        break;
+                    }
+                }
+                if found_path.is_some() { break; }
+            }
+
+            if let Some(path) = found_path {
+                profile = Some(crate::agent::cortex::AgentProfile {
+                    agent_id: agent_id.clone(),
+                    display_name: None,
+                    status: None,
+                    bio: None,
+                    avatar_seed: None,
+                    avatar_path: Some(path),
+                    generated_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+        }
 
         agents.push(AgentSummary {
             id: agent_id,
+            group: agent_config.group.clone(),
             channel_count,
             memory_total,
             cron_job_count: cron_job_count as usize,
@@ -1192,6 +1251,9 @@ pub(super) async fn instance_overview(
             profile,
         });
     }
+
+    // Sort agents by group to ensure they are listed together as requested.
+    agents.sort_by(|a, b| a.group.cmp(&b.group));
 
     Ok(Json(InstanceOverviewResponse {
         version: env!("CARGO_PKG_VERSION"),
@@ -1210,6 +1272,62 @@ pub(super) async fn get_agent_profile(
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
     let profile = crate::agent::cortex::load_profile(pool, &query.agent_id).await;
+
+    let mut profile = profile;
+
+    // If avatar_path is not set in DB, check if it exists on disk in the agent's data or workspace dir.
+    if let Some(ref mut p) = profile {
+        if p.avatar_path.is_none() {
+            let instance_dir = state.instance_dir.load();
+            let agent_dir = instance_dir.join("agents").join(&query.agent_id);
+            let data_dir = agent_dir.join("data");
+            let workspace_dir = agent_dir.join("workspace");
+            
+            let mut found_path = None;
+            for dir in &[data_dir, workspace_dir] {
+                for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
+                    let path = dir.join(format!("avatar.{}", ext));
+                    if path.exists() {
+                        found_path = Some(path.to_string_lossy().to_string());
+                        break;
+                    }
+                }
+                if found_path.is_some() { break; }
+            }
+            p.avatar_path = found_path;
+        }
+    } else {
+        // If no profile exists at all, but an avatar does, create a minimal profile.
+        let instance_dir = state.instance_dir.load();
+        let agent_dir = instance_dir.join("agents").join(&query.agent_id);
+        let data_dir = agent_dir.join("data");
+        let workspace_dir = agent_dir.join("workspace");
+
+        let mut found_path = None;
+        for dir in &[data_dir, workspace_dir] {
+            for ext in &["png", "jpg", "jpeg", "gif", "webp"] {
+                let path = dir.join(format!("avatar.{}", ext));
+                if path.exists() {
+                    found_path = Some(path.to_string_lossy().to_string());
+                    break;
+                }
+            }
+            if found_path.is_some() { break; }
+        }
+
+        if let Some(path) = found_path {
+            profile = Some(crate::agent::cortex::AgentProfile {
+                agent_id: query.agent_id.clone(),
+                display_name: None,
+                status: None,
+                bio: None,
+                avatar_seed: None,
+                avatar_path: Some(path),
+                generated_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+            });
+        }
+    }
 
     Ok(Json(AgentProfileResponse { profile }))
 }

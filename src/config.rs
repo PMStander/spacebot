@@ -2318,7 +2318,7 @@ impl Config {
             llm.providers
                 .entry("gemini".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
@@ -2803,7 +2803,7 @@ impl Config {
             llm.providers
                 .entry("gemini".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,

@@ -19,6 +19,8 @@ pub enum DocType {
     Soul,
     /// Configuration files (TOML, etc.).
     Config,
+    /// Source code files (.rs, .ts, .py, etc.).
+    Code,
     /// Any other markdown or text document.
     Other,
 }
@@ -33,6 +35,7 @@ impl DocType {
             DocType::Identity => "identity",
             DocType::Soul => "soul",
             DocType::Config => "config",
+            DocType::Code => "code",
             DocType::Other => "other",
         }
     }
@@ -46,6 +49,7 @@ impl DocType {
             "identity" => DocType::Identity,
             "soul" => DocType::Soul,
             "config" => DocType::Config,
+            "code" => DocType::Code,
             _ => DocType::Other,
         }
     }

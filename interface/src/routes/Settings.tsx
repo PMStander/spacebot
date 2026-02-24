@@ -97,15 +97,6 @@ const PROVIDERS = [
 		defaultModel: "gpt-4.1",
 	},
 	{
-		id: "gemini",
-		name: "Gemini",
-		description: "Google Gemini models",
-		placeholder: "AIza...",
-		envVar: "GEMINI_API_KEY",
-		defaultModel: "gemini-2.0-flash-exp",
-	},
-
-	{
 		id: "zai-coding-plan",
 		name: "Z.AI Coding Plan",
 		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
@@ -336,7 +327,7 @@ export function Settings() {
 				apiKey: keyInput.trim(),
 				model: modelInput.trim(),
 			});
-			setTestResult({ success: result.success, message: result.message, sample: result.sample });
+			setTestResult({ success: result.success, message: result.message, sample: result.sample ?? undefined });
 			if (result.success) {
 				setTestedSignature(currentSignature);
 				return true;
@@ -519,11 +510,11 @@ export function Settings() {
 												name={provider.name}
 												description={provider.description}
 												configured={isConfigured(provider.id)}
-												defaultModel={provider.defaultModel}
+												defaultModel={"defaultModel" in provider ? provider.defaultModel : undefined}
 												onEdit={() => {
 													setEditingProvider(provider.id);
 													setKeyInput("");
-													setModelInput(provider.defaultModel ?? "");
+													setModelInput("defaultModel" in provider ? provider.defaultModel : "");
 													setTestedSignature(null);
 													setTestResult(null);
 													setMessage(null);

@@ -25,3 +25,15 @@ rig = { version = "0.30.0", package = "rig-core", features = ["derive"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+lto = "thin"
+strip = true
+
+# Fast build for local dev — release-speed binaries without the slow LTO link
+[profile.dev-fast]
+inherits = "release"
+lto = false
+incremental = true
+codegen-units = 16
+debug = 0

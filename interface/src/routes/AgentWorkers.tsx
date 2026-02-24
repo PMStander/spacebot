@@ -131,9 +131,9 @@ function ActiveWorkerCard({ worker, agentId }: {
 		<div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
 			<div className="flex items-start justify-between gap-3">
 				<div className="min-w-0 flex-1">
-					<div className="flex items-center gap-2">
+					<div className="min-w-0 flex items-center gap-2">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-						<span className="text-sm font-medium text-ink">{worker.task}</span>
+						<span className="truncate text-sm font-medium text-ink">{worker.task}</span>
 					</div>
 					<div className="mt-1.5 flex items-center gap-3 text-tiny text-ink-faint">
 						<span>{worker.status}</span>
@@ -195,7 +195,7 @@ function WorkerRunCard({ run, agentId, expanded, onToggle }: {
 				className="flex w-full items-start gap-3 px-4 py-3 text-left"
 			>
 				<div className="min-w-0 flex-1">
-					<div className="flex items-center gap-2">
+					<div className="min-w-0 flex items-center gap-2">
 						<Badge size="sm" variant={statusBadgeVariant}>
 							{run.status}
 						</Badge>

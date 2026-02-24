@@ -1128,6 +1128,15 @@ impl Channel {
             }
             Err(error) => {
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
+                // Surface the error to the user so they know what went wrong
+                let error_message = format!("⚠️ Something went wrong: {error}");
+                if let Err(send_err) = self
+                    .response_tx
+                    .send(OutboundResponse::Text(error_message))
+                    .await
+                {
+                    tracing::error!(%send_err, channel_id = %self.id, "failed to send error message to user");
+                }
             }
         }
 

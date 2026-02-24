@@ -476,9 +476,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "Anthropic API error ({status}): {message}"
             )));
@@ -589,9 +587,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "OpenAI API error ({status}): {message}"
             )));
@@ -716,6 +712,13 @@ impl SpacebotModel {
             })?
         };
 
+        if !status.is_success() {
+            let message = extract_error_message(&response_body, &response_text);
+            return Err(CompletionError::ProviderError(format!(
+                "OpenAI Responses API error ({status}): {message}"
+            )));
+        }
+
         parse_openai_responses_response(response_body)
     }
 
@@ -808,9 +811,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "{provider_display_name} API error ({status}): {message}"
             )));
@@ -898,9 +899,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "{provider_display_name} API error ({status}): {message}"
             )));
@@ -1047,14 +1046,23 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                             // OpenAI expects arguments as a JSON string
                             let args_string = serde_json::to_string(&tc.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
-                            tool_calls.push(serde_json::json!({
+                            let mut tc_json = serde_json::json!({
                                 "id": tc.id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.function.name,
                                     "arguments": args_string,
                                 }
-                            }));
+                            });
+                            // Include Gemini thought_signature if present (required for thinking models)
+                            if let Some(ref sig) = tc.signature {
+                                tc_json["extra_content"] = serde_json::json!({
+                                    "google": {
+                                        "thought_signature": sig,
+                                    }
+                                });
+                            }
+                            tool_calls.push(tc_json);
                         }
                         _ => {}
                     }
@@ -1231,6 +1239,24 @@ fn convert_image_openai_responses(image: &Image) -> Option<serde_json::Value> {
     }
 }
 
+/// Extract an error message from a JSON error response, falling back to the raw body.
+fn extract_error_message(response_body: &serde_json::Value, raw_body: &str) -> String {
+    // Try standard OpenAI/Anthropic format: { "error": { "message": "..." } }
+    if let Some(msg) = response_body["error"]["message"].as_str() {
+        return msg.to_string();
+    }
+    // Try top-level "message" field
+    if let Some(msg) = response_body["message"].as_str() {
+        return msg.to_string();
+    }
+    // Try stringified "error" field
+    if let Some(msg) = response_body["error"].as_str() {
+        return msg.to_string();
+    }
+    // Fall back to truncated raw body so the actual response is visible
+    format!("unknown error — raw response: {}", truncate_body(raw_body))
+}
+
 /// Truncate a response body for error messages to avoid dumping megabytes of HTML.
 fn truncate_body(body: &str) -> &str {
     let limit = 500;
@@ -1244,6 +1270,15 @@ fn truncate_body(body: &str) -> &str {
 // --- Response parsing ---
 
 fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> ToolCall {
+    make_tool_call_with_signature(id, name, arguments, None)
+}
+
+fn make_tool_call_with_signature(
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+    signature: Option<String>,
+) -> ToolCall {
     ToolCall {
         id,
         call_id: None,
@@ -1251,7 +1286,7 @@ fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> Too
             name: name.trim().to_string(),
             arguments,
         },
-        signature: None,
+        signature,
         additional_params: None,
     }
 }
@@ -1264,6 +1299,8 @@ fn parse_anthropic_response(
         .ok_or_else(|| CompletionError::ResponseError("missing content array".into()))?;
 
     let mut assistant_content = Vec::new();
+
+    let mut thinking_text: Option<String> = None;
 
     for block in content_blocks {
         match block["type"].as_str() {
@@ -1280,12 +1317,13 @@ fn parse_anthropic_response(
                 )));
             }
             Some("thinking") => {
-                // Thinking blocks contain internal reasoning, not actionable output.
-                // We'll skip them but log for debugging.
+                // Capture thinking text in case the response contains only thinking blocks.
+                if let Some(text) = block["thinking"].as_str() {
+                    thinking_text = Some(text.to_string());
+                }
                 tracing::debug!("skipping thinking block in Anthropic response");
             }
             _ => {
-                // Unknown block type - log but skip
                 tracing::debug!(
                     "skipping unknown block type in Anthropic response: {:?}",
                     block["type"].as_str()
@@ -1294,14 +1332,26 @@ fn parse_anthropic_response(
         }
     }
 
+    // If the model returned only thinking blocks (no text/tool_use), surface the
+    // thinking content so the caller gets *something* rather than a hard error.
+    // This can happen when the model exhausts output tokens during extended thinking
+    // or when the conversation is very long.
+    if assistant_content.is_empty() {
+        if let Some(thought) = thinking_text {
+            tracing::warn!(
+                stop_reason = body["stop_reason"].as_str().unwrap_or("unknown"),
+                content_blocks = content_blocks.len(),
+                "Anthropic returned thinking-only response, surfacing thinking as text"
+            );
+            assistant_content.push(AssistantContent::Text(Text {
+                text: thought,
+            }));
+        }
+    }
+
     let choice = OneOrMany::many(assistant_content).unwrap_or_else(|_| {
-        // Anthropic returns an empty content array when stop_reason is end_turn
-        // and the model has nothing further to say (e.g. after a side-effect-only
-        // tool call like react/skip). Treat this as a clean empty response rather
-        // than an error so the agentic loop terminates gracefully.
-        let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
-        tracing::debug!(
-            stop_reason,
+        tracing::warn!(
+            stop_reason = body["stop_reason"].as_str().unwrap_or("unknown"),
             content_blocks = content_blocks.len(),
             "empty assistant_content from Anthropic — returning synthetic empty text"
         );
@@ -1370,8 +1420,12 @@ fn parse_openai_response(
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .or_else(|| arguments_field.as_object().map(|_| arguments_field.clone()))
                 .unwrap_or(serde_json::json!({}));
-            assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                id, name, arguments,
+            // Extract Gemini thought_signature if present (required for thinking models)
+            let signature = tc["extra_content"]["google"]["thought_signature"]
+                .as_str()
+                .map(|s| s.to_string());
+            assistant_content.push(AssistantContent::ToolCall(make_tool_call_with_signature(
+                id, name, arguments, signature,
             )));
         }
     }

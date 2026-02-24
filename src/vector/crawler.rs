@@ -38,7 +38,19 @@ impl WorkspaceCrawler {
             if path.is_dir() {
                 // Skip hidden directories and common non-content dirs
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with('.') || name == "node_modules" || name == "target" {
+                    if name.starts_with('.')
+                        || matches!(
+                            name,
+                            "node_modules"
+                                | "target"
+                                | "dist"
+                                | "build"
+                                | "__pycache__"
+                                | ".next"
+                                | "vendor"
+                                | ".git"
+                        )
+                    {
                         continue;
                     }
                 }
@@ -51,10 +63,23 @@ impl WorkspaceCrawler {
         }
     }
 
+    /// Maximum file size to index (512 KB). Larger files are likely generated or binary.
+    const MAX_FILE_SIZE: u64 = 512 * 1024;
+
     fn is_indexable(path: &Path) -> bool {
+        // Check file size first to skip large/generated files
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.len() > Self::MAX_FILE_SIZE {
+                return false;
+            }
+        }
+
         matches!(
             path.extension().and_then(|e| e.to_str()),
-            Some("md" | "toml")
+            Some(
+                "md" | "toml" | "txt" | "json" | "yaml" | "yml" | "rs" | "ts" | "tsx" | "js"
+                    | "jsx" | "py" | "sh" | "css" | "html"
+            )
         )
     }
 
@@ -118,8 +143,14 @@ impl WorkspaceCrawler {
         {
             return DocType::Plan;
         }
-        if file_name.ends_with(".toml") {
+        if file_name.ends_with(".toml") || file_name.ends_with(".yaml") || file_name.ends_with(".yml") || file_name.ends_with(".json") {
             return DocType::Config;
+        }
+        if matches!(
+            Path::new(file_name).extension().and_then(|e| e.to_str()),
+            Some("rs" | "ts" | "tsx" | "js" | "jsx" | "py" | "sh" | "css" | "html")
+        ) {
+            return DocType::Code;
         }
         DocType::Other
     }

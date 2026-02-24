@@ -472,7 +472,7 @@ function SparklineChart({ data }: { data: number[] }) {
 	const hasGradient = data.length > 0;
 
 	return (
-		<ResponsiveContainer width="100%" height="100%">
+		<ResponsiveContainer width="100%" height="100%" minWidth={0}>
 			<AreaChart data={chartData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
 				{hasGradient && (
 					<defs>

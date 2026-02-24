@@ -2,7 +2,7 @@
 
 use super::state::ApiState;
 use super::{
-    agents, artifacts, bindings, canvas, channels, config, cortex, cron, ingest, local_file, mcp,
+    agents, artifacts, avatar, bindings, canvas, channels, config, cortex, cron, ingest, local_file, mcp,
     memories, messaging, models, providers, settings, skills, system, webchat, workers,
 };
 
@@ -195,6 +195,10 @@ pub async fn start_http_server(
         )
         .route("/agents/canvas", get(canvas::list_canvas_panels))
         .route("/agents/workers", get(workers::list_worker_runs))
+        .route(
+            "/agents/avatar",
+            get(avatar::get_avatar).post(avatar::upload_avatar),
+        )
         .route("/local-file", get(local_file::serve_local_file))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(

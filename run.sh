@@ -3,15 +3,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Spacebot"
-APP_ID="sh.spacebot.desktop"
-APP_VERSION="0.1.7"
-BINARY_NAME="spacebot-desktop"
 APP_BUNDLE="/Applications/$APP_NAME.app"
 
 echo "Building $APP_NAME..."
 echo ""
 
-# Build frontend (embedded into the binary via rust_embed at compile time)
+# Build frontend (Tauri embeds the dev/dist URL, but we need it built for production mode)
 echo "Building frontend..."
 cd "$SCRIPT_DIR/interface"
 npm install --silent
@@ -19,8 +16,20 @@ npm run build
 cd "$SCRIPT_DIR"
 
 echo ""
-echo "Building Rust binary..."
-cargo build --package spacebot-desktop --release
+
+# Use dev-fast profile by default; pass --release for production builds
+if [ "$1" = "--release" ]; then
+  CARGO_PROFILE="release"
+  TARGET_DIR="release"
+  echo "Building Tauri app (release — with LTO, will be slow)..."
+else
+  CARGO_PROFILE="dev-fast"
+  TARGET_DIR="dev-fast"
+  echo "Building Tauri app (dev-fast — no LTO)..."
+fi
+
+# Build the Tauri desktop binary (includes the webview window)
+cargo build --manifest-path "$SCRIPT_DIR/src-tauri/Cargo.toml" --profile "$CARGO_PROFILE"
 
 echo ""
 echo "Assembling $APP_NAME.app..."
@@ -30,8 +39,8 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy binary
-cp "$SCRIPT_DIR/target/release/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+# Copy the Tauri binary
+cp "$SCRIPT_DIR/src-tauri/target/$TARGET_DIR/spacebot-desktop" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
 # Generate AppIcon.icns from the source PNG using built-in macOS tools
 ICONSET="$(mktemp -d)/AppIcon.iconset"
@@ -51,6 +60,8 @@ iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 rm -rf "$(dirname "$ICONSET")"
 
 # Write Info.plist
+APP_ID="sh.spacebot.desktop"
+APP_VERSION="0.1.7"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

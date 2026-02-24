@@ -93,10 +93,10 @@ impl Tool for VectorSearchTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Search workspace documents (skills, plans, docs, identity files) \
-                using semantic similarity. Returns relevant documents ranked by relevance. \
-                Use this to discover skills, find related documentation, or locate relevant \
-                plans and guides."
+            description: "Search workspace documents (skills, plans, docs, identity files, \
+                source code) using semantic similarity. Returns relevant documents ranked \
+                by relevance. Use this to discover skills, find related documentation, \
+                locate relevant plans and guides, or search through code files."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -110,7 +110,7 @@ impl Tool for VectorSearchTool {
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["skill", "plan", "docs", "identity", "soul", "config", "other"]
+                            "enum": ["skill", "plan", "docs", "identity", "soul", "config", "code", "other"]
                         },
                         "description": "Filter results to specific document types."
                     },

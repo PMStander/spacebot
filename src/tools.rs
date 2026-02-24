@@ -371,6 +371,7 @@ pub fn create_cortex_chat_tool_server(
     agent_id: String,
     api_event_tx: tokio::sync::broadcast::Sender<crate::api::ApiEvent>,
     document_search: Option<Arc<DocumentSearch>>,
+    worker_channel_state: Option<crate::agent::channel::ChannelState>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
@@ -380,6 +381,13 @@ pub fn create_cortex_chat_tool_server(
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace));
+
+    if let Some(state) = worker_channel_state {
+        tracing::info!("cortex chat tool server: spawn_worker tool REGISTERED");
+        server = server.tool(SpawnWorkerTool::new(state));
+    } else {
+        tracing::warn!("cortex chat tool server: spawn_worker tool NOT registered (no worker_channel_state)");
+    }
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));

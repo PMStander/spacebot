@@ -6,6 +6,7 @@
 
 mod agents;
 mod artifacts;
+mod avatar;
 mod bindings;
 mod canvas;
 mod channels;
