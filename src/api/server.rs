@@ -54,6 +54,7 @@ pub async fn start_http_server(
         .route("/system/storage", get(system::storage_status))
         .route("/system/backup/export", get(system::backup_export))
         .route("/system/backup/restore", post(system::backup_restore))
+        .route("/system/open-privacy-settings", post(system::open_privacy_settings))
         .route("/overview", get(agents::instance_overview))
         .route("/events", get(system::events_sse))
         .route(

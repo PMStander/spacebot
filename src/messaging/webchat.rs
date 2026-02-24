@@ -124,6 +124,15 @@ impl Messaging for WebChatAdapter {
         Ok(())
     }
 
+    async fn fetch_history(
+        &self,
+        _message: &crate::InboundMessage,
+        _limit: usize,
+    ) -> crate::Result<Vec<crate::messaging::traits::HistoryMessage>> {
+        // Webchat history is managed client-side and fetched via the API directly
+        Ok(Vec::new())
+    }
+
     async fn health_check(&self) -> crate::Result<()> {
         Ok(())
     }

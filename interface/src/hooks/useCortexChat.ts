@@ -66,7 +66,7 @@ async function consumeSSE(
 	}
 }
 
-function generateThreadId(): string {
+function generateThreadId() {
 	return crypto.randomUUID();
 }
 
@@ -82,9 +82,13 @@ export function useCortexChat(
 	const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
 	const [activeWorkers, setActiveWorkers] = useState<WorkerInfo[]>([]);
 	const [artifactRefs, setArtifactRefs] = useState<ArtifactRef[]>([]);
-	const loadedRef = useRef(false);
+	
+	// Track whether we've loaded the initial history for the current agent/channel
+	const loadedRef = useRef<{ agentId?: string; channelId?: string }>({});
+	
 	// Accumulate artifact content across delta events
 	const pendingArtifactRef = useRef<ArtifactPayload | null>(null);
+	
 	// Keep a stable ref to threadId so EventSource callbacks can read it without
 	// causing the EventSource to be torn down and recreated on each thread change.
 	const threadIdRef = useRef<string | null>(null);
@@ -102,13 +106,21 @@ export function useCortexChat(
 			} catch {
 				/* ignore */
 			}
+		} else {
+			// Clear artifacts if we switch thread and have no history
+			setArtifactRefs([]);
 		}
 	}, [threadId]);
 
-	// Load thread on mount — scoped to channel when one is provided
+	// Load thread on mount or when agentId/channelId changes
 	useEffect(() => {
-		if (loadedRef.current) return;
-		loadedRef.current = true;
+		// Only skip if we already loaded this specific agent and channel
+		if (
+			loadedRef.current.agentId === agentId && 
+			loadedRef.current.channelId === channelId
+		) return;
+		
+		loadedRef.current = { agentId, channelId };
 
 		if (channelId) {
 			// Each channel gets its own persistent cortex thread
@@ -118,6 +130,7 @@ export function useCortexChat(
 				setMessages(data.messages);
 			}).catch(() => {
 				// Fresh thread — no history yet for this channel
+				setMessages([]);
 			});
 		} else {
 			api.cortexChatMessages(agentId).then((data) => {
@@ -126,6 +139,7 @@ export function useCortexChat(
 			}).catch((error) => {
 				console.warn("Failed to load cortex chat history:", error);
 				setThreadId(generateThreadId());
+				setMessages([]);
 			});
 		}
 	}, [agentId, channelId]);
@@ -147,179 +161,207 @@ export function useCortexChat(
 					),
 				);
 
-				// Reload messages after a short delay to let the cortex synthesis save
-				const tid = threadIdRef.current;
-				if (tid) {
-					setTimeout(() => {
-						api
-							.cortexChatMessages(agentId, tid)
-							.then((resp) => setMessages(resp.messages))
-							.catch(() => {});
-					}, 500);
+				// Reload messages if we have a stable threadId
+				if (threadIdRef.current) {
+					api.cortexChatMessages(agentId, threadIdRef.current).then((history) => {
+						setMessages(history.messages);
+					}).catch(() => { /* ignore */ });
 				}
 			} catch {
-				/* ignore parse errors */
+				/* ignore */
 			}
 		});
 
-		return () => es.close();
+		return () => {
+			es.close();
+		};
 	}, [agentId]);
 
-	const spawnWorker = useCallback(
-		async (task: string, skill?: string) => {
-			if (!threadId) return;
+	const sendMessage = useCallback(
+		async (text: string, attachments: CortexChatAttachmentRef[] = []) => {
+			if (isStreaming || !threadId) return;
+			if (!text.trim() && attachments.length === 0) return;
+
+			setError(null);
+			setIsStreaming(true);
+			setToolActivity([]);
+			pendingArtifactRef.current = null;
+
+			// Optimistically add user message
+			const userMessage: CortexChatMessage = {
+				id: `user-${Date.now()}`,
+				role: "user",
+				content: text,
+				attachments: attachments.length > 0 ? attachments : undefined,
+			};
+			setMessages((prev) => [...prev, userMessage]);
+
+			let currentAssistantMessage = "";
+			const assistantId = `assistant-${Date.now()}`;
+
 			try {
-				const result = await api.cortexChatSpawnWorker(agentId, threadId, task, skill);
-				setActiveWorkers((prev) => [
-					...prev,
-					{ id: result.worker_id, task: result.task, status: "running" as const },
-				]);
-			} catch (err) {
-				console.warn("Failed to spawn cortex worker:", err);
-				setError("Failed to spawn worker");
+				const response = await api.cortexChatSend(
+					agentId,
+					threadId,
+					text,
+					channelId,
+					attachments,
+				);
+				if (!response.ok) {
+					throw new Error(`HTTP ${response.status}`);
+				}
+
+				await consumeSSE(response, (eventType, data) => {
+					if (eventType === "worker_started") {
+						try {
+							const parsed = JSON.parse(data);
+							setActiveWorkers((prev) => [
+								...prev,
+								{
+									id: parsed.worker_id,
+									task: parsed.task,
+									status: "running",
+								},
+							]);
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "tool_started") {
+						try {
+							const parsed = JSON.parse(data);
+							setToolActivity((prev) => [
+								...prev,
+								{ tool: parsed.tool_name, status: "running" },
+							]);
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "tool_completed") {
+						try {
+							const parsed = JSON.parse(data);
+							setToolActivity((prev) =>
+								prev.map((t) =>
+									t.tool === parsed.tool_name && t.status === "running"
+										? { ...t, status: "done", result_preview: parsed.result_preview }
+										: t,
+								),
+							);
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "text") {
+						try {
+							const content = JSON.parse(data);
+							setMessages((prev) => {
+								const existing = prev.find((m) => m.id === assistantId);
+								if (existing) {
+									return prev.map((m) =>
+										m.id === assistantId ? { ...m, content } : m,
+									);
+								}
+								return [...prev, { id: assistantId, role: "assistant", content }];
+							});
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "stream_chunk") {
+						try {
+							const chunk = JSON.parse(data);
+							currentAssistantMessage += chunk;
+							setMessages((prev) => {
+								const existing = prev.find((m) => m.id === assistantId);
+								if (existing) {
+									return prev.map((m) =>
+										m.id === assistantId
+											? { ...m, content: currentAssistantMessage }
+											: m,
+									);
+								}
+								return [
+									...prev,
+									{
+										id: assistantId,
+										role: "assistant",
+										content: currentAssistantMessage,
+									},
+								];
+							});
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "artifact_chunk") {
+						try {
+							const parsed = JSON.parse(data);
+							if (!pendingArtifactRef.current) {
+								pendingArtifactRef.current = {
+									id: parsed.id,
+									kind: parsed.kind,
+									title: parsed.title,
+									content: parsed.content || "",
+								};
+							} else {
+								pendingArtifactRef.current.content += (parsed.content || "");
+							}
+						} catch {
+							/* ignore */
+						}
+					} else if (eventType === "artifact_end") {
+						try {
+							const parsed = JSON.parse(data);
+							const current = pendingArtifactRef.current;
+							if (current && current.id === parsed.id) {
+								// Keep the ref card in the chat log
+								const newRef = {
+									id: current.id,
+									kind: current.kind,
+									title: current.title,
+								};
+								
+								setArtifactRefs((prev) => {
+									const updated = [...prev, newRef];
+									localStorage.setItem(`cortex-arts-${threadId}`, JSON.stringify(updated));
+									return updated;
+								});
+								
+								if (onArtifactReceived) {
+									onArtifactReceived(current);
+								}
+								pendingArtifactRef.current = null;
+							}
+						} catch {
+							/* ignore */
+						}
+					}
+				});
+			} catch (error) {
+				setError(error instanceof Error ? error.message : "Request failed");
+			} finally {
+				setIsStreaming(false);
+				setToolActivity([]);
 			}
 		},
-		[agentId, threadId],
+		[agentId, threadId, channelId, isStreaming, onArtifactReceived],
 	);
 
-	const sendMessage = useCallback(async (text: string, attachments: CortexChatAttachmentRef[] = []) => {
-		if (isStreaming || !threadId) return;
-		if (!text.trim() && attachments.length === 0) return;
-
-		setError(null);
-		setIsStreaming(true);
-		setToolActivity([]);
-		pendingArtifactRef.current = null;
-
-		const contentParts: string[] = [];
-		if (text.trim()) {
-			contentParts.push(text.trim());
-		}
-		if (attachments.length > 0) {
-			const labels = attachments.map((attachment) => attachment.filename).join(", ");
-			contentParts.push(`[attachments: ${labels}]`);
-		}
-
-		// Optimistically add user message
-		const userMessage: CortexChatMessage = {
-			id: `tmp-${Date.now()}`,
-			thread_id: threadId,
-			role: "user",
-			content: contentParts.join("\n"),
-			channel_context: channelId ?? null,
-			created_at: new Date().toISOString(),
-		};
-		setMessages((prev) => [...prev, userMessage]);
-
-		try {
-			const response = await api.cortexChatSend(
-				agentId,
-				threadId,
-				text,
-				channelId,
-				attachments,
-			);
-			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}`);
-			}
-
-			await consumeSSE(response, (eventType, data) => {
-				if (eventType === "tool_started") {
-					try {
-						const parsed = JSON.parse(data);
-						setToolActivity((prev) => [
-							...prev,
-							{ tool: parsed.tool, status: "running" },
-						]);
-					} catch { /* ignore */ }
-				} else if (eventType === "tool_completed") {
-					try {
-						const parsed = JSON.parse(data);
-						setToolActivity((prev) =>
-							prev.map((t) =>
-								t.tool === parsed.tool && t.status === "running"
-									? { ...t, status: "done", result_preview: parsed.result_preview }
-									: t,
-							),
-						);
-					} catch { /* ignore */ }
-				} else if (eventType === "done") {
-					try {
-						const parsed = JSON.parse(data);
-						const assistantMessage: CortexChatMessage = {
-							id: `resp-${Date.now()}`,
-							thread_id: threadId,
-							role: "assistant",
-							content: parsed.full_text,
-							channel_context: channelId ?? null,
-							created_at: new Date().toISOString(),
-						};
-						setMessages((prev) => [...prev, assistantMessage]);
-					} catch {
-						setError("Failed to parse response");
-					}
-				} else if (eventType === "artifact_start") {
-					try {
-						const parsed = JSON.parse(data);
-						pendingArtifactRef.current = {
-							id: parsed.artifact_id,
-							kind: parsed.kind,
-							title: parsed.title,
-							content: "",
-						};
-					} catch { /* ignore */ }
-				} else if (eventType === "artifact_delta") {
-					try {
-						const parsed = JSON.parse(data);
-						const pending = pendingArtifactRef.current;
-						if (pending && pending.id === parsed.artifact_id) {
-							pendingArtifactRef.current = {
-								...pending,
-								content: pending.content + parsed.data,
-							};
-						}
-					} catch { /* ignore */ }
-				} else if (eventType === "artifact_done") {
-					const artifact = pendingArtifactRef.current;
-					pendingArtifactRef.current = null;
-					if (artifact) {
-						onArtifactReceived?.(artifact);
-						const ref: ArtifactRef = { id: artifact.id, kind: artifact.kind, title: artifact.title };
-						setArtifactRefs((prev) => {
-							const updated = prev.some((r) => r.id === ref.id) ? prev : [...prev, ref];
-							localStorage.setItem(`cortex-arts-${threadId}`, JSON.stringify(updated));
-							return updated;
-						});
-					}
-				} else if (eventType === "error") {
-					try {
-						const parsed = JSON.parse(data);
-						setError(parsed.message);
-					} catch {
-						setError("Unknown error");
-					}
-				}
-			});
-		} catch (error) {
-			setError(error instanceof Error ? error.message : "Request failed");
-		} finally {
-			setIsStreaming(false);
-			setToolActivity([]);
-		}
-	}, [agentId, channelId, threadId, isStreaming, onArtifactReceived]);
-
 	const newThread = useCallback(() => {
-		setThreadId(generateThreadId());
+		// Generate a new thread ID, blowing away the current view and backend link
+		const newId = generateThreadId();
+		setThreadId(newId);
 		setMessages([]);
 		setError(null);
 		setToolActivity([]);
 		setActiveWorkers([]);
 		setArtifactRefs([]);
+		localStorage.removeItem(`cortex-arts-${newId}`);
+	}, []);
+
+	// Stub for spawnWorker to match panel expectations if not fully implemented in the hook
+	const spawnWorker = useCallback((task: string) => {
+		console.warn("spawnWorker not implemented directly in useCortexChat");
 	}, []);
 
 	return {
 		messages,
-		threadId,
 		isStreaming,
 		error,
 		toolActivity,

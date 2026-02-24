@@ -52,7 +52,13 @@ async function consumeSSE(
 }
 
 export function useWebChat(agentId: string) {
-	const [sessionId, setSessionId] = useState(getPortalChatSessionId(agentId));
+	const [sessionId, setSessionId] = useState(() => getPortalChatSessionId(agentId));
+
+	const [prevAgentId, setPrevAgentId] = useState(agentId);
+	if (agentId !== prevAgentId) {
+		setPrevAgentId(agentId);
+		setSessionId(getPortalChatSessionId(agentId));
+	}
 	const [messages, setMessages] = useState<WebChatMessage[]>([]);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -63,10 +69,14 @@ export function useWebChat(agentId: string) {
 		let cancelled = false;
 		(async () => {
 			try {
+				// Log the fetch attempt
+				console.log("Fetching history for", agentId, sessionId);
 				const response = await api.webChatHistory(agentId, sessionId);
 				if (!response.ok || cancelled) return;
 				const history: { id: string; role: string; content: string }[] = await response.json();
 				if (cancelled) return;
+				// Log the result
+				console.log("Got history", history);
 				setMessages(
 					history.map((m) => ({
 						id: m.id,
@@ -74,7 +84,9 @@ export function useWebChat(agentId: string) {
 						content: m.content || "[attachment]",
 					})),
 				);
-			} catch { /* ignore — fresh session */ }
+			} catch (err) {
+				console.error("Failed to fetch history:", err);
+			}
 		})();
 		return () => { cancelled = true; };
 	}, [agentId, sessionId]);

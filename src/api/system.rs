@@ -40,6 +40,40 @@ pub(super) async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Opens the macOS Privacy & Security settings panel.
+pub(super) async fn open_privacy_settings() -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    #[cfg(target_os = "macos")]
+    {
+        let result = tokio::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy")
+            .status()
+            .await
+            .map_err(|error| {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to open system settings: {error}"),
+                )
+            })?;
+
+        if result.success() {
+            Ok(Json(serde_json::json!({ "success": true, "message": "Opened Privacy & Security settings" })))
+        } else {
+            Err((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to open system settings".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "this action is only available on macOS".to_string(),
+        ))
+    }
+}
+
 /// Reports whether the instance is idle (no active workers or branches).
 /// Used by the platform to gate rolling updates.
 pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {

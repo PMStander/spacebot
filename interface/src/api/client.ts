@@ -1545,6 +1545,15 @@ export const api = {
 		return response.json() as Promise<GlobalSettingsUpdateResponse>;
 	},
 
+	// System actions
+	openPrivacySettings: async () => {
+		const response = await fetch(`${API_BASE}/system/open-privacy-settings`, { method: "POST" });
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean; message: string }>;
+	},
+
 	// Raw config API
 	rawConfig: () => fetchJson<RawConfigResponse>("/config/raw"),
 	updateRawConfig: async (content: string) => {

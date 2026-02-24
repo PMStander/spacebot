@@ -73,7 +73,7 @@ function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 }
 
 export function WebChatPanel({ agentId }: WebChatPanelProps) {
-	const { messages, isStreaming, error, toolActivity, sendMessage, clearChat } = useWebChat(agentId);
+	const { messages, sessionId, isStreaming, error, toolActivity, sendMessage, clearChat } = useWebChat(agentId);
 	const { liveStates } = useLiveContext();
 	const navigate = useNavigate();
 	const [input, setInput] = useState("");
@@ -84,7 +84,7 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
-	const sessionId = getPortalChatSessionId(agentId);
+	// sessionId comes from the hook
 	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
 

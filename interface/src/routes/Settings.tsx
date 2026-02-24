@@ -11,7 +11,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "permissions" | "config-file";
 
 const SECTIONS = [
 	{
@@ -49,6 +49,12 @@ const SECTIONS = [
 		label: "Worker Logs",
 		group: "system" as const,
 		description: "Worker execution logging",
+	},
+	{
+		id: "permissions" as const,
+		label: "Permissions",
+		group: "system" as const,
+		description: "macOS system permissions",
 	},
 	{
 		id: "config-file" as const,
@@ -563,6 +569,8 @@ export function Settings() {
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "permissions" ? (
+						<PermissionsSection />
 					) : activeSection === "config-file" ? (
 						<ConfigFileSection />
 					) : null}
@@ -1322,6 +1330,96 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 					</Button>
 				</div>
 			)}
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
+							? "border-green-500/20 bg-green-500/10 text-green-400"
+							: "border-red-500/20 bg-red-500/10 text-red-400"
+						}`}
+				>
+					{message.text}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function PermissionsSection() {
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+	const [loading, setLoading] = useState(false);
+
+	const handleOpenPrivacySettings = async () => {
+		setLoading(true);
+		setMessage(null);
+		try {
+			await api.openPrivacySettings();
+			setMessage({ text: "Opened Privacy & Security settings", type: "success" });
+		} catch (error: any) {
+			setMessage({ text: `Failed to open settings: ${error.message}`, type: "error" });
+		} finally {
+			setLoading(false);
+		}
+	};
+
+	const PERMISSIONS = [
+		{
+			name: "Full Disk Access",
+			description: "Allows workers to read and write files across the system without per-folder prompts",
+			required: true,
+		},
+		{
+			name: "Accessibility",
+			description: "Required for browser automation and headless Chrome interactions",
+			required: false,
+		},
+		{
+			name: "Developer Tools",
+			description: "Allows spawning child processes (workers, CLI tools) without Gatekeeper checks",
+			required: false,
+		},
+	];
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">System Permissions</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Spacebot spawns worker processes that need macOS permissions to access files,
+					run commands, and automate browsers. Grant these permissions to avoid repeated
+					system prompts.
+				</p>
+			</div>
+
+			<div className="flex flex-col gap-3">
+				{PERMISSIONS.map((perm) => (
+					<div key={perm.name} className="rounded-lg border border-app-line bg-app-box p-4">
+						<div className="flex items-center gap-3">
+							<div className="flex-1">
+								<div className="flex items-center gap-2">
+									<span className="text-sm font-medium text-ink">{perm.name}</span>
+									{perm.required && (
+										<span className="rounded bg-accent/10 px-1.5 py-0.5 text-tiny font-medium text-accent">
+											Recommended
+										</span>
+									)}
+								</div>
+								<p className="mt-0.5 text-sm text-ink-dull">{perm.description}</p>
+							</div>
+						</div>
+					</div>
+				))}
+			</div>
+
+			<div className="mt-6">
+				<Button onClick={handleOpenPrivacySettings} loading={loading}>
+					Open Privacy &amp; Security Settings
+				</Button>
+				<p className="mt-2 text-sm text-ink-faint">
+					Find Spacebot in the list and enable the permissions above. You may need to restart
+					Spacebot after granting permissions.
+				</p>
+			</div>
 
 			{message && (
 				<div
