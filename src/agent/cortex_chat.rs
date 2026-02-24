@@ -104,7 +104,8 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     ) -> ToolCallHookAction {
         self.send(CortexChatEvent::ToolStarted {
             tool: tool_name.to_string(),
-        }).await;
+        })
+        .await;
         ToolCallHookAction::Continue
     }
 
@@ -124,7 +125,8 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         self.send(CortexChatEvent::ToolCompleted {
             tool: tool_name.to_string(),
             result_preview: preview,
-        }).await;
+        })
+        .await;
         HookAction::Continue
     }
 
@@ -330,7 +332,8 @@ impl CortexChatSession {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("workers not enabled for this cortex session"))?;
 
-        let worker_id = spawn_worker_from_state(worker_state, task, false, skill)
+        let suggested: Vec<&str> = skill.into_iter().collect();
+        let worker_id = spawn_worker_from_state(worker_state, task, false, &suggested)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -537,9 +540,11 @@ impl CortexChatSession {
                     let _ = store
                         .save_message(&thread_id, "assistant", &error_text, channel_ref)
                         .await;
-                    let _ = event_tx.send(CortexChatEvent::Error {
-                        message: error_text,
-                    }).await;
+                    let _ = event_tx
+                        .send(CortexChatEvent::Error {
+                            message: error_text,
+                        })
+                        .await;
                 }
             }
         });
@@ -547,7 +552,10 @@ impl CortexChatSession {
         Ok(event_rx)
     }
 
-    async fn build_system_prompt(&self, channel_context_id: Option<&str>) -> crate::error::Result<String> {
+    async fn build_system_prompt(
+        &self,
+        channel_context_id: Option<&str>,
+    ) -> crate::error::Result<String> {
         let runtime_config = &self.deps.runtime_config;
         let prompt_engine = runtime_config.prompts.load();
 

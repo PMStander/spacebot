@@ -127,7 +127,9 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let identity_context = rc.identity.load().render();
     let memory_bulletin = rc.memory_bulletin.load();
     let skills = rc.skills.load();
-    let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+    let skills_prompt = skills
+        .render_channel_prompt(&prompt_engine)
+        .unwrap_or_default();
 
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
@@ -325,6 +327,7 @@ async fn dump_worker_context() {
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
         vec![],
+        deps.runtime_config.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -478,6 +481,7 @@ async fn dump_all_contexts() {
         deps.api_event_tx.clone(),
         deps.document_search.clone(),
         vec![],
+        deps.runtime_config.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

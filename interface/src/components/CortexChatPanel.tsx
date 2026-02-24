@@ -114,11 +114,11 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 	if (activity.length === 0) return null;
 
 	return (
-		<div className="flex flex-col gap-1 px-3 py-2">
+		<div className="flex flex-wrap items-center gap-1.5 mt-2">
 			{activity.map((tool, index) => (
-				<div
+				<span
 					key={`${tool.tool}-${index}`}
-					className="flex items-center gap-2 rounded bg-app-darkBox/40 px-2 py-1"
+					className="inline-flex items-center gap-1.5 rounded-full bg-app-box/60 px-2.5 py-0.5"
 				>
 					{tool.status === "running" ? (
 						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
@@ -127,12 +127,22 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 					)}
 					<span className="font-mono text-tiny text-ink-faint">{tool.tool}</span>
 					{tool.status === "done" && tool.result_preview && (
-						<span className="min-w-0 flex-1 truncate text-tiny text-ink-faint/60">
+						<span className="min-w-0 max-w-[120px] truncate text-tiny text-ink-faint/60">
 							{tool.result_preview.slice(0, 80)}
 						</span>
 					)}
-				</div>
+				</span>
 			))}
+		</div>
+	);
+}
+
+function ThinkingIndicator() {
+	return (
+		<div className="flex items-center gap-1.5 py-1">
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
 		</div>
 	);
 }
@@ -148,18 +158,12 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 	const inputRef = useRef<HTMLInputElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
 
-	// Auto-scroll on new messages or tool activity
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
 	}, [messages.length, isStreaming, toolActivity.length, activeWorkers.length]);
 
-	// Focus input on mount
-	useEffect(() => {
-		inputRef.current?.focus();
-	}, []);
-
-	const handleSubmit = (event: React.FormEvent) => {
-		event.preventDefault();
+	const handleSubmit = (event?: React.FormEvent) => {
+		event?.preventDefault();
 		const trimmed = input.trim();
 		if ((!trimmed && pendingAttachments.length === 0) || isUploading) return;
 
@@ -219,24 +223,24 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 	};
 
 	return (
-		<div className="flex h-full w-full flex-col bg-app-darkBox/30">
+		<div className="flex h-full w-full flex-col">
 			{/* Header */}
-			<div className="flex h-12 items-center justify-between border-b border-app-line/50 px-4">
+			<div className="flex h-10 items-center justify-between border-b border-app-line/50 px-3">
 				<div className="flex items-center gap-2">
 					<span className="text-sm font-medium text-ink">Cortex</span>
 					{channelId && (
-						<span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-tiny text-violet-400">
-							{channelId.length > 24 ? `${channelId.slice(0, 24)}...` : channelId}
+						<span className="rounded-full bg-app-box px-2 py-0.5 text-tiny text-ink-faint">
+							{channelId.length > 20 ? `${channelId.slice(0, 20)}...` : channelId}
 						</span>
 					)}
 				</div>
-				<div className="flex items-center gap-1">
+				<div className="flex items-center gap-0.5">
 					<Button
 						onClick={newThread}
 						variant="ghost"
 						size="icon"
 						className="h-7 w-7"
-						title="New chat"
+						title="New thread"
 					>
 						<HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
 					</Button>
@@ -332,22 +336,18 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 							))}
 						</div>
 					)}
+
+					{/* Streaming state */}
 					{isStreaming && (
 						<div className="mr-2 rounded-md bg-app-darkBox/50 px-3 py-2">
 							<span className="text-tiny font-medium text-violet-400">cortex</span>
 							<ToolActivityIndicator activity={toolActivity} />
-							{toolActivity.length === 0 && (
-								<div className="mt-1 flex items-center gap-1">
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400 [animation-delay:0.2s]" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400 [animation-delay:0.4s]" />
-									<span className="ml-1 text-tiny text-ink-faint">thinking...</span>
-								</div>
-							)}
+							{toolActivity.length === 0 && <ThinkingIndicator />}
 						</div>
 					)}
+
 					{error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5 text-sm text-red-400">
 							{error}
 						</div>
 					)}
@@ -355,80 +355,80 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 				</div>
 			</div>
 
-				{/* Input */}
-				<form onSubmit={handleSubmit} className="border-t border-app-line/50 p-3">
-					<input
-						ref={fileInputRef}
-						type="file"
-						multiple
-						accept="image/png,image/jpeg,image/gif,image/webp"
-						className="hidden"
-						onChange={handleFileChange}
-					/>
-					{pendingAttachments.length > 0 && (
-						<div className="mb-2 flex flex-wrap gap-1.5">
-							{pendingAttachments.map((attachment, index) => (
-								<div
-									key={`${attachment.path}-${index}`}
-									className="flex items-center gap-1 rounded border border-app-line bg-app-darkBox px-2 py-1 text-tiny text-ink-faint"
+			{/* Input */}
+			<form onSubmit={handleSubmit} className="border-t border-app-line/50 p-3">
+				<input
+					ref={fileInputRef}
+					type="file"
+					multiple
+					accept="image/png,image/jpeg,image/gif,image/webp"
+					className="hidden"
+					onChange={handleFileChange}
+				/>
+				{pendingAttachments.length > 0 && (
+					<div className="mb-2 flex flex-wrap gap-1.5">
+						{pendingAttachments.map((attachment, index) => (
+							<div
+								key={`${attachment.path}-${index}`}
+								className="flex items-center gap-1 rounded border border-app-line bg-app-darkBox px-2 py-1 text-tiny text-ink-faint"
+							>
+								<span className="max-w-56 truncate">{attachment.filename}</span>
+								<button
+									type="button"
+									onClick={() => removeAttachment(index)}
+									className="text-ink-faint transition-colors hover:text-ink"
+									aria-label={`Remove ${attachment.filename}`}
 								>
-									<span className="max-w-56 truncate">{attachment.filename}</span>
-									<button
-										type="button"
-										onClick={() => removeAttachment(index)}
-										className="text-ink-faint transition-colors hover:text-ink"
-										aria-label={`Remove ${attachment.filename}`}
-									>
-										<HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3" />
-									</button>
-								</div>
-							))}
-						</div>
-					)}
-					<div className="flex gap-2">
-						<Button
-							type="button"
-							onClick={handlePickFiles}
-							disabled={isStreaming || isUploading}
-							size="sm"
-							variant="ghost"
-							className="px-2"
-							title="Upload reference images"
-						>
-							<HugeiconsIcon icon={Add01Icon} className="h-3.5 w-3.5" />
-						</Button>
-						<input
-							ref={inputRef}
-							type="text"
-							value={input}
-							onChange={(event) => setInput(event.target.value)}
-							placeholder={
-								isStreaming
-									? "Waiting for response..."
-									: isUploading
-										? "Uploading images..."
-										: "Message the cortex… or /worker <task>"
-							}
-							disabled={isUploading || isStreaming}
-							className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-violet-500/50 focus:outline-none focus:ring-0 disabled:opacity-60"
-						/>
-						<Button
-							type="submit"
-							disabled={
-								isUploading
-									|| (isStreaming && !input.trim().startsWith("/worker "))
-									|| (!input.trim() && pendingAttachments.length === 0)
-							}
-							size="sm"
-							className="bg-violet-500/20 text-violet-400 hover:bg-violet-500/30"
-						>
-							Send
-						</Button>
+									<HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3" />
+								</button>
+							</div>
+						))}
 					</div>
-					{uploadError && (
-						<p className="mt-2 text-tiny text-red-400">{uploadError}</p>
-					)}
-				</form>
-			</div>
-		);
-	}
+				)}
+				<div className="flex gap-2">
+					<Button
+						type="button"
+						onClick={handlePickFiles}
+						disabled={isStreaming || isUploading}
+						size="sm"
+						variant="ghost"
+						className="px-2"
+						title="Upload reference images"
+					>
+						<HugeiconsIcon icon={Add01Icon} className="h-3.5 w-3.5" />
+					</Button>
+					<input
+						ref={inputRef}
+						type="text"
+						value={input}
+						onChange={(event) => setInput(event.target.value)}
+						placeholder={
+							isStreaming
+								? "Waiting for response..."
+								: isUploading
+									? "Uploading images..."
+									: "Message the cortex… or /worker <task>"
+						}
+						disabled={isUploading || isStreaming}
+						className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-violet-500/50 focus:outline-none focus:ring-0 disabled:opacity-60"
+					/>
+					<Button
+						type="submit"
+						disabled={
+							isUploading
+								|| (isStreaming && !input.trim().startsWith("/worker "))
+								|| (!input.trim() && pendingAttachments.length === 0)
+						}
+						size="sm"
+						className="bg-violet-500/20 text-violet-400 hover:bg-violet-500/30"
+					>
+						Send
+					</Button>
+				</div>
+				{uploadError && (
+					<p className="mt-2 text-tiny text-red-400">{uploadError}</p>
+				)}
+			</form>
+		</div>
+	);
+}

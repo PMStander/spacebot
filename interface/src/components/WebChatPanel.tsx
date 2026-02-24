@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { useWebChat, type ToolActivity } from "@/hooks/useWebChat";
+import { useWebChat, getPortalChatSessionId, type ToolActivity } from "@/hooks/useWebChat";
 import { api, type WebChatAttachmentRef } from "@/api/client";
+import type { ActiveWorker } from "@/hooks/useChannelLiveState";
+import { useLiveContext } from "@/hooks/useLiveContext";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/ui";
 import { Add01Icon, Cancel01Icon, PlusSignIcon, FloppyDiskIcon } from "@hugeicons/core-free-icons";
@@ -15,11 +17,11 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 	if (activity.length === 0) return null;
 
 	return (
-		<div className="flex flex-col gap-1 px-3 py-2">
+		<div className="flex flex-wrap items-center gap-1.5 mt-2">
 			{activity.map((tool, index) => (
-				<div
+				<span
 					key={`${tool.tool}-${index}`}
-					className="flex items-center gap-2 rounded bg-app-darkBox/40 px-2 py-1"
+					className="inline-flex items-center gap-1.5 rounded-full bg-app-box/60 px-2.5 py-0.5"
 				>
 					{tool.status === "running" ? (
 						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
@@ -27,14 +29,52 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 						<span className="h-1.5 w-1.5 rounded-full bg-green-400" />
 					)}
 					<span className="font-mono text-tiny text-ink-faint">{tool.tool}</span>
-				</div>
+				</span>
 			))}
+		</div>
+	);
+}
+
+function ThinkingIndicator() {
+	return (
+		<div className="flex items-center gap-1.5 py-1">
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+		</div>
+	);
+}
+
+function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
+	if (workers.length === 0) return null;
+
+	return (
+		<div className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
+			<div className="mb-2 flex items-center gap-1.5 text-tiny text-amber-200">
+				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+				<span>
+					{workers.length} active worker{workers.length !== 1 ? "s" : ""}
+				</span>
+			</div>
+			<div className="flex flex-col gap-1.5">
+				{workers.map((worker) => (
+					<div key={worker.id} className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
+						<span className="font-medium text-amber-300">Worker</span>
+						<span className="min-w-0 flex-1 truncate text-ink-dull">{worker.task}</span>
+						<span className="shrink-0 text-ink-faint">{worker.status}</span>
+						{worker.currentTool && (
+							<span className="max-w-40 shrink-0 truncate text-amber-400/80">{worker.currentTool}</span>
+						)}
+					</div>
+				))}
+			</div>
 		</div>
 	);
 }
 
 export function WebChatPanel({ agentId }: WebChatPanelProps) {
 	const { messages, isStreaming, error, toolActivity, sendMessage, clearChat } = useWebChat(agentId);
+	const { liveStates } = useLiveContext();
 	const navigate = useNavigate();
 	const [input, setInput] = useState("");
 	const [pendingAttachments, setPendingAttachments] = useState<WebChatAttachmentRef[]>([]);
@@ -44,10 +84,13 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	const sessionId = getPortalChatSessionId(agentId);
+	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
+	const hasActiveWorkers = activeWorkers.length > 0;
 
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-	}, [messages.length, isStreaming, toolActivity.length]);
+	}, [messages.length, isStreaming, toolActivity.length, activeWorkers.length]);
 
 	useEffect(() => {
 		inputRef.current?.focus();
@@ -151,51 +194,52 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 
 			{/* Messages */}
 			<div className="flex-1 overflow-y-auto">
-				<div className="flex flex-col gap-3 p-4">
-					{messages.length === 0 && !isStreaming && (
-						<p className="py-8 text-center text-sm text-ink-faint">
-							Chat with {agentId}
-						</p>
-					)}
-					{messages.map((message) => (
-						<div
-							key={message.id}
-							className={`rounded-md px-3 py-2 ${
-								message.role === "user"
-									? "ml-8 bg-accent/10"
-									: "mr-2 bg-app-darkBox/50"
-							}`}
-						>
-							<span className={`text-tiny font-medium ${
-								message.role === "user" ? "text-accent-faint" : "text-emerald-400"
-							}`}>
-								{message.role === "user" ? "you" : agentId}
-							</span>
-							<div className="mt-0.5 text-sm text-ink-dull">
-								{message.role === "assistant" ? (
-									<Markdown>{message.content}</Markdown>
-								) : (
-									<p>{message.content}</p>
-								)}
-							</div>
+				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
+					{hasActiveWorkers && (
+						<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
+							<ActiveWorkersPanel workers={activeWorkers} />
 						</div>
-					))}
-					{isStreaming && messages[messages.length - 1]?.role !== "assistant" && (
-						<div className="mr-2 rounded-md bg-app-darkBox/50 px-3 py-2">
-							<span className="text-tiny font-medium text-emerald-400">{agentId}</span>
-							<ToolActivityIndicator activity={toolActivity} />
-							{toolActivity.length === 0 && (
-								<div className="mt-1 flex items-center gap-1">
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 [animation-delay:0.2s]" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400 [animation-delay:0.4s]" />
-									<span className="ml-1 text-tiny text-ink-faint">thinking...</span>
+					)}
+
+					{messages.length === 0 && !isStreaming && (
+						<div className="flex flex-col items-center justify-center py-24">
+							<p className="text-sm text-ink-faint">
+								Start a conversation with {agentId}
+							</p>
+						</div>
+					)}
+
+					{messages.map((message) => (
+						<div key={message.id}>
+							{message.role === "user" ? (
+								<div className="flex justify-end">
+									<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5">
+										<p className="text-sm text-ink">{message.content}</p>
+									</div>
+								</div>
+							) : (
+								<div className="text-sm text-ink-dull">
+									<Markdown>{message.content}</Markdown>
 								</div>
 							)}
 						</div>
+					))}
+
+					{/* Streaming state */}
+					{isStreaming && messages[messages.length - 1]?.role !== "assistant" && (
+						<div>
+							<ToolActivityIndicator activity={toolActivity} />
+							{toolActivity.length === 0 && <ThinkingIndicator />}
+						</div>
 					)}
+
+					{/* Inline tool activity during streaming assistant message */}
+					{isStreaming && messages[messages.length - 1]?.role === "assistant" && toolActivity.length > 0 && (
+						<ToolActivityIndicator activity={toolActivity} />
+					)}
+
 					{error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
 							{error}
 						</div>
 					)}
