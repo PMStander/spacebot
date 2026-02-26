@@ -788,11 +788,14 @@ async fn initialize_agents(
             .await,
         );
 
+        let task_store = Arc::new(spacebot::tasks::TaskStore::new(db.sqlite.clone()));
+
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
             llm_manager: llm_manager.clone(),
             mcp_manager,
+            task_store,
             cron_tool: None,
             runtime_config,
             event_tx,
@@ -1147,16 +1150,18 @@ async fn initialize_agents(
 
             // Build tool server WITH spawn_worker tool now that channel state exists
             let tool_server = spacebot::tools::create_cortex_chat_tool_server(
+                agent_id.clone(),
+                agent.deps.task_store.clone(),
                 agent.deps.memory_search.clone(),
                 conversation_logger,
                 channel_store,
+                worker_channel_state.process_run_logger.clone(),
                 browser_config,
                 agent.config.screenshot_dir(),
                 brave_search_key,
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.runtime_config.instance_dir.clone(),
                 agent.db.sqlite.clone(),
-                agent_id.to_string(),
                 api_state.event_tx.clone(),
                 agent.deps.document_search.clone(),
                 Some(worker_channel_state.clone()),
