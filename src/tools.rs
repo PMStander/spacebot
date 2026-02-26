@@ -360,7 +360,7 @@ pub fn create_branch_tool_server(
             "branch",
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
-        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone().into()));
 
     if let Some(search) = document_search {
         server = server.tool(VectorSearchTool::new(search));
@@ -480,7 +480,6 @@ pub fn create_cortex_chat_tool_server(
     workspace: PathBuf,
     _instance_dir: PathBuf,
     sqlite_pool: sqlx::SqlitePool,
-    agent_id: String,
     api_event_tx: tokio::sync::broadcast::Sender<crate::api::ApiEvent>,
     document_search: Option<Arc<DocumentSearch>>,
     worker_channel_state: Option<crate::agent::channel::ChannelState>,
@@ -521,12 +520,12 @@ pub fn create_cortex_chat_tool_server(
     server = server
         .tool(CanvasSetTool::new(
             sqlite_pool.clone(),
-            agent_id.clone(),
+            agent_id.to_string(),
             api_event_tx.clone(),
         ))
         .tool(CanvasRemoveTool::new(
             sqlite_pool.clone(),
-            agent_id.clone(),
+            agent_id.to_string(),
             api_event_tx,
         ))
         .tool(CanvasListTool::new(sqlite_pool));

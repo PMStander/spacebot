@@ -784,7 +784,6 @@ pub(super) async fn create_agent(
         runtime_config.workspace_dir.clone(),
         runtime_config.instance_dir.clone(),
         db.sqlite.clone(),
-        agent_id.clone(),
         state.event_tx.clone(),
         Some(document_search),
         None, // Workers added later via CortexChatSession

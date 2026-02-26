@@ -121,6 +121,27 @@ export type ApiEvent =
 	| ToolStartedEvent
 	| ToolCompletedEvent;
 
+export interface CanvasUpdatedEvent {
+	type: "canvas_updated";
+	agent_id: string;
+	panel_name: string;
+}
+
+export interface CanvasRemovedEvent {
+	type: "canvas_removed";
+	agent_id: string;
+	panel_name: string;
+}
+
+export interface ArtifactCreatedEvent {
+	type: "artifact_created";
+	agent_id: string;
+	channel_id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+}
+
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);
 	if (!response.ok) {
@@ -158,7 +179,88 @@ export interface TimelineWorkerRun {
 	completed_at: string | null;
 }
 
-export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun;
+export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun | TimelineArtifactNotice;
+
+export interface TimelineArtifactNotice {
+	type: "artifact_notice";
+	id: string;
+	artifact_id: string;
+	kind: ArtifactInfo["kind"];
+	title: string;
+	created_at: string;
+}
+
+export interface WebChatAttachmentRef {
+	filename: string;
+	mime_type: string;
+	path: string;
+	size_bytes: number;
+}
+
+export interface WebChatUploadResponse {
+	attachments: WebChatAttachmentRef[];
+}
+
+export interface CortexChatAttachmentRef {
+	id?: string;
+	filename: string;
+	mime_type: string;
+	path: string;
+	size_bytes: number;
+}
+
+export interface CortexChatUploadResponse {
+	attachments: CortexChatAttachmentRef[];
+}
+
+// -- Artifact Types --
+
+export interface ArtifactInfo {
+	id: string;
+	channel_id: string | null;
+	kind:
+		| "code"
+		| "text"
+		| "image"
+		| "sheet"
+		| "book"
+		| "html"
+		| "chart"
+		| "diagram"
+		| "checklist"
+		| "form"
+		| "kanban"
+		| "table"
+		| "graph";
+	title: string;
+	content: string;
+	metadata: Record<string, unknown> | null;
+	version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface ArtifactsResponse {
+	artifacts: ArtifactInfo[];
+	total: number;
+}
+
+// -- Canvas Types --
+
+export interface CanvasPanel {
+	id: string;
+	name: string;
+	title: string;
+	content: string;
+	position: number;
+	metadata: { span?: number; height?: number } | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface CanvasPanelsResponse {
+	panels: CanvasPanel[];
+}
 
 export interface MessagesResponse {
 	items: TimelineItem[];
@@ -1267,6 +1369,44 @@ export const api = {
 				channel_id: channelId ?? null,
 			}),
 		}),
+
+	cortexChatUpload: async (agentId: string, files: File[]) => {
+		const formData = new FormData();
+		for (const file of files) {
+			formData.append("files", file);
+		}
+		const response = await fetch(
+			`${API_BASE}/cortex-chat/upload?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<CortexChatUploadResponse>;
+	},
+
+	cortexChatSpawnWorker: async (
+		agentId: string,
+		threadId: string,
+		task: string,
+		skill?: string,
+	): Promise<{ worker_id: string; task: string }> => {
+		const response = await fetch(`${API_BASE}/cortex-chat/spawn-worker`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: agentId,
+				thread_id: threadId,
+				task,
+				skill: skill ?? null,
+			}),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ worker_id: string; task: string }>;
+	},
+
 	agentProfile: (agentId: string) =>
 		fetchJson<AgentProfileResponse>(`/agents/profile?agent_id=${encodeURIComponent(agentId)}`),
 	agentIdentity: (agentId: string) =>
@@ -1843,6 +1983,67 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
+
+	// Avatar API
+	avatarUrl: (agentId: string) =>
+		`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
+
+	uploadAvatar: async (agentId: string, file: File) => {
+		const formData = new FormData();
+		formData.append("avatar", file);
+		const response = await fetch(
+			`${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "POST", body: formData },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean }>;
+	},
+
+	// Artifacts API
+	artifacts: (agentId: string, params: { channel_id?: string; kind?: string; limit?: number; offset?: number } = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.channel_id) search.set("channel_id", params.channel_id);
+		if (params.kind) search.set("kind", params.kind);
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		return fetchJson<ArtifactsResponse>(`/agents/artifacts?${search}`);
+	},
+
+	getArtifact: (agentId: string, artifactId: string) =>
+		fetchJson<ArtifactInfo>(`/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`),
+
+	createArtifact: async (agentId: string, body: { channel_id?: string; kind: string; title: string; content: string; metadata?: Record<string, unknown> | null }) => {
+		const response = await fetch(`${API_BASE}/agents/artifacts`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, ...body }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<ArtifactInfo>;
+	},
+
+	updateArtifact: async (agentId: string, artifactId: string, body: { content?: string; title?: string; metadata?: Record<string, unknown> | null }) => {
+		const response = await fetch(`${API_BASE}/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(body),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<ArtifactInfo>;
+	},
+
+	deleteArtifact: (agentId: string, artifactId: string) =>
+		fetch(`${API_BASE}/agents/artifacts/${artifactId}?agent_id=${encodeURIComponent(agentId)}`, { method: "DELETE" }),
+
+	// Canvas API
+	canvasPanels: (agentId: string) =>
+		fetchJson<CanvasPanelsResponse>(`/agents/canvas?agent_id=${encodeURIComponent(agentId)}`),
 
 	eventsUrl: `${API_BASE}/events`,
 };

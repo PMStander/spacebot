@@ -667,6 +667,8 @@ impl Channel {
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            false, // cli_workers_enabled
+            &[],   // cli_backends
         )?;
 
         let status_text = {
@@ -956,6 +958,8 @@ impl Channel {
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            false, // cli_workers_enabled
+            &[],   // cli_backends
         )?;
 
         let status_text = {
@@ -1793,6 +1797,7 @@ async fn spawn_branch(
         state.deps.memory_search.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
+        state.deps.document_search.clone(),
         crate::conversation::ProcessRunLogger::new(state.deps.sqlite_pool.clone()),
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();

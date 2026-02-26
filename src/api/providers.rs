@@ -180,6 +180,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         openrouter_key: (provider == "openrouter").then(|| credential.to_string()),
         kilo_key: (provider == "kilo").then(|| credential.to_string()),
         zhipu_key: (provider == "zhipu").then(|| credential.to_string()),
+        zhipu_sub_key: (provider == "zhipu-sub").then(|| credential.to_string()),
         groq_key: (provider == "groq").then(|| credential.to_string()),
         together_key: (provider == "together").then(|| credential.to_string()),
         fireworks_key: (provider == "fireworks").then(|| credential.to_string()),

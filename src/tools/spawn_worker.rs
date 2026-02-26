@@ -173,7 +173,6 @@ impl Tool for SpawnWorkerTool {
                 &args.task,
                 directory,
                 args.interactive,
-                args.model.as_deref(),
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?

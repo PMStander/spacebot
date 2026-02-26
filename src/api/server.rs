@@ -2,8 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, settings, skills, system, tasks, webchat, workers,
+    agents, artifacts, avatar, bindings, canvas, channels, config, cortex, cron, ingest, links,
+    local_file, mcp, memories, messaging, models, providers, settings, skills, system, tasks,
+    webchat, workers,
 };
 
 use axum::Json;
@@ -54,6 +55,8 @@ pub async fn start_http_server(
         .route("/system/storage", get(system::storage_status))
         .route("/system/backup/export", get(system::backup_export))
         .route("/system/backup/restore", post(system::backup_restore))
+        .route("/system/open-privacy-settings", post(system::open_privacy_settings))
+        .route("/system/open-url", post(system::open_url))
         .route("/overview", get(agents::instance_overview))
         .route("/events", get(system::events_sse))
         .route(
@@ -84,7 +87,10 @@ pub async fn start_http_server(
         .route("/agents/overview", get(agents::agent_overview))
         .route(
             "/channels",
-            get(channels::list_channels).delete(channels::delete_channel),
+            get(channels::list_channels)
+                .post(channels::create_internal_channel)
+                .put(channels::rename_channel)
+                .delete(channels::delete_channel),
         )
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
@@ -100,6 +106,11 @@ pub async fn start_http_server(
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
+        .route(
+            "/cortex-chat/spawn-worker",
+            post(cortex::cortex_chat_spawn_worker),
+        )
+        .route("/cortex-chat/upload", post(cortex::upload_chat_files))
         .route("/agents/profile", get(agents::get_agent_profile))
         .route(
             "/agents/identity",
@@ -185,6 +196,23 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route(
+            "/agents/artifacts",
+            get(artifacts::list_artifacts)
+                .post(artifacts::create_artifact),
+        )
+        .route(
+            "/agents/artifacts/{id}",
+            get(artifacts::get_artifact)
+                .put(artifacts::update_artifact)
+                .delete(artifacts::delete_artifact),
+        )
+        .route("/agents/canvas", get(canvas::list_canvas_panels))
+        .route(
+            "/agents/avatar",
+            get(avatar::get_avatar).post(avatar::upload_avatar),
+        )
+        .route("/local-file", get(local_file::serve_local_file))
         .route("/links", get(links::list_links).post(links::create_link))
         .route(
             "/links/{from}/{to}",

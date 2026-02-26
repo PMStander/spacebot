@@ -9666,7 +9666,7 @@ dependencies = [
 
 [[package]]
 name = "spacebot"
-version = "0.1.15"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -9689,6 +9689,7 @@ dependencies = [
  "dirs",
  "emojis",
  "fastembed",
+ "flate2",
  "futures",
  "hex",
  "ignore",
@@ -9698,6 +9699,7 @@ dependencies = [
  "libc",
  "mime_guess",
  "minijinja",
+ "moka",
  "notify",
  "open",
  "opentelemetry",
