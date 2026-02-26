@@ -35,5 +35,5 @@ strip = true
 inherits = "release"
 lto = false
 incremental = true
-codegen-units = 16
+codegen-units = 8
 debug = 0

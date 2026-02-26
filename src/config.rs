@@ -2991,8 +2991,18 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
+        let mut resolved_routing = resolve_routing(toml.defaults.routing, &base_defaults.routing);
+        // If no fallbacks were explicitly configured, populate from provider defaults.
+        // This ensures users get sensible fallback chains without having to manually
+        // configure [defaults.routing.fallbacks] in their TOML.
+        if resolved_routing.fallbacks.is_empty() {
+            let provider =
+                crate::llm::routing::provider_from_model(&resolved_routing.channel);
+            let provider_defaults = crate::llm::routing::defaults_for_provider(provider);
+            resolved_routing.fallbacks = provider_defaults.fallbacks;
+        }
         let defaults = DefaultsConfig {
-            routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
+            routing: resolved_routing,
             max_concurrent_branches: toml
                 .defaults
                 .max_concurrent_branches
@@ -3224,9 +3234,17 @@ impl Config {
             .into_iter()
             .map(|a| -> Result<AgentConfig> {
                 // Per-agent routing resolves against instance defaults
-                let agent_routing = a
-                    .routing
-                    .map(|r| resolve_routing(Some(r), &defaults.routing));
+                let agent_routing = a.routing.map(|r| {
+                    let mut resolved = resolve_routing(Some(r), &defaults.routing);
+                    if resolved.fallbacks.is_empty() {
+                        let provider =
+                            crate::llm::routing::provider_from_model(&resolved.channel);
+                        let provider_defaults =
+                            crate::llm::routing::defaults_for_provider(provider);
+                        resolved.fallbacks = provider_defaults.fallbacks;
+                    }
+                    resolved
+                });
 
                 let cron = a
                     .cron

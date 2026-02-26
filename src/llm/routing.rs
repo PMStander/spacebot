@@ -109,6 +109,13 @@ pub fn is_retriable_error(error_message: &str) -> bool {
         || lower.contains("empty response")
         || lower.contains("failed to read response body")
         || lower.contains("error decoding response body")
+        // Network-level reqwest/hyper transport errors
+        || lower.contains("error sending request")
+        || lower.contains("dns error")
+        || lower.contains("dns lookup")
+        || lower.contains("connect error")
+        || lower.contains("reset by peer")
+        || lower.contains("broken pipe")
 }
 
 /// Whether a completion error indicates context window overflow.
@@ -302,6 +309,9 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
             let channel: String = "gemini/gemini-2.5-pro".into();
             let worker: String = "gemini/gemini-2.5-flash".into();
             let lite: String = "gemini/gemini-2.5-flash-lite".into();
+            let g31_pro: String = "gemini/gemini-3.1-pro-preview".into();
+            let g3_pro: String = "gemini/gemini-3-pro-preview".into();
+            let g3_flash: String = "gemini/gemini-3-flash-preview".into();
             RoutingConfig {
                 channel: channel.clone(),
                 branch: channel.clone(),
@@ -310,7 +320,13 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 cortex: worker.clone(),
                 voice: String::new(),
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
-                fallbacks: HashMap::from([(channel, vec![worker.clone()]), (worker, vec![lite])]),
+                fallbacks: HashMap::from([
+                    (channel, vec![worker.clone()]),
+                    (worker.clone(), vec![lite]),
+                    (g31_pro, vec![g3_flash.clone(), worker.clone()]),
+                    (g3_pro, vec![g3_flash.clone(), worker.clone()]),
+                    (g3_flash, vec![worker]),
+                ]),
                 rate_limit_cooldown_secs: 60,
                 ..RoutingConfig::default()
             }
@@ -391,4 +407,68 @@ pub const RETRY_BASE_DELAY_MS: u64 = 500;
 pub fn is_rate_limit_error(error_message: &str) -> bool {
     let lower = error_message.to_lowercase();
     lower.contains("429") || lower.contains("rate limit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retriable_error_detects_reqwest_network_errors() {
+        assert!(is_retriable_error(
+            "error sending request for url (https://generativelanguage.googleapis.com/v1beta/openai/chat/completions)"
+        ));
+    }
+
+    #[test]
+    fn retriable_error_detects_dns_and_connection_errors() {
+        assert!(is_retriable_error("dns error: failed to lookup address"));
+        assert!(is_retriable_error("connect error: Connection refused"));
+        assert!(is_retriable_error("connection reset by peer"));
+        assert!(is_retriable_error("broken pipe"));
+    }
+
+    #[test]
+    fn retriable_error_detects_existing_patterns() {
+        assert!(is_retriable_error("429 Too Many Requests"));
+        assert!(is_retriable_error("rate limit exceeded"));
+        assert!(is_retriable_error("502 Bad Gateway"));
+        assert!(is_retriable_error("connection timeout"));
+        assert!(is_retriable_error("empty response from provider"));
+    }
+
+    #[test]
+    fn non_retriable_errors_are_rejected() {
+        assert!(!is_retriable_error("invalid api key"));
+        assert!(!is_retriable_error("bad request: malformed JSON"));
+        assert!(!is_retriable_error("401 Unauthorized"));
+        assert!(!is_retriable_error("billing quota exceeded"));
+    }
+
+    #[test]
+    fn gemini_3x_models_have_fallbacks() {
+        let config = defaults_for_provider("gemini");
+        assert!(
+            !config
+                .get_fallbacks("gemini/gemini-3.1-pro-preview")
+                .is_empty()
+        );
+        assert!(
+            !config
+                .get_fallbacks("gemini/gemini-3-pro-preview")
+                .is_empty()
+        );
+        assert!(
+            !config
+                .get_fallbacks("gemini/gemini-3-flash-preview")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn gemini_2x_fallbacks_unchanged() {
+        let config = defaults_for_provider("gemini");
+        let pro_fallbacks = config.get_fallbacks("gemini/gemini-2.5-pro");
+        assert_eq!(pro_fallbacks, &["gemini/gemini-2.5-flash"]);
+    }
 }

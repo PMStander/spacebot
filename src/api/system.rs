@@ -74,6 +74,35 @@ pub(super) async fn open_privacy_settings() -> Result<Json<serde_json::Value>, (
     }
 }
 
+/// Opens a URL in the user's default browser.
+///
+/// Needed because Tauri's WKWebView blocks `window.open()` popups.
+pub(super) async fn open_url(
+    Json(request): Json<OpenUrlRequest>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    // Only allow https URLs to prevent abuse
+    if !request.url.starts_with("https://") {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            "only https URLs are allowed".to_string(),
+        ));
+    }
+
+    open::that(&request.url).map_err(|error| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to open URL: {error}"),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct OpenUrlRequest {
+    url: String,
+}
+
 /// Reports whether the instance is idle (no active workers or branches).
 /// Used by the platform to gate rolling updates.
 pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {

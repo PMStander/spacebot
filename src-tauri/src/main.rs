@@ -148,6 +148,11 @@ async fn start_server() -> anyhow::Result<()> {
     api_state.set_bindings(bindings.clone()).await;
     let default_agent_id = config.default_agent_id().to_string();
 
+    // Parse config links into shared agent links (hot-reloadable via ArcSwap)
+    let agent_links = Arc::new(ArcSwap::from_pointee(
+        spacebot::links::AgentLink::from_config(&config.links)?,
+    ));
+
     // Set the config path on the API state for config.toml writes
     let config_path = config.instance_dir.join("config.toml");
     api_state.set_config_path(config_path.clone()).await;
@@ -155,6 +160,7 @@ async fn start_server() -> anyhow::Result<()> {
     api_state.set_embedding_model(embedding_model.clone()).await;
     api_state.set_prompt_engine(prompt_engine.clone()).await;
     api_state.set_defaults_config(config.defaults.clone()).await;
+    api_state.set_agent_links((**agent_links.load()).clone());
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;
@@ -186,6 +192,7 @@ async fn start_server() -> anyhow::Result<()> {
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            agent_links.clone(),
         )
         .await?;
         agents_initialized = true;
@@ -202,6 +209,7 @@ async fn start_server() -> anyhow::Result<()> {
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
+            agent_links.clone(),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -216,6 +224,7 @@ async fn start_server() -> anyhow::Result<()> {
             bindings.clone(),
             None,
             llm_manager.clone(),
+            agent_links.clone(),
         );
     }
 
@@ -498,6 +507,7 @@ async fn start_server() -> anyhow::Result<()> {
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    agent_links.clone(),
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -512,6 +522,7 @@ async fn start_server() -> anyhow::Result<()> {
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
+                                            agent_links.clone(),
                                         );
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -605,8 +616,22 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
+
+    // Build agent name map for inter-agent message routing
+    let agent_name_map: Arc<std::collections::HashMap<String, String>> = Arc::new(
+        resolved_agents
+            .iter()
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    a.display_name.clone().unwrap_or_else(|| a.id.clone()),
+                )
+            })
+            .collect(),
+    );
 
     for agent_config in &resolved_agents {
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
@@ -753,6 +778,16 @@ async fn initialize_agents(
             mcp_manager.clone(),
         ));
 
+        let sandbox = std::sync::Arc::new(
+            spacebot::sandbox::Sandbox::new(
+                &agent_config.sandbox,
+                agent_config.workspace.clone(),
+                &config.instance_dir,
+                agent_config.data_dir.clone(),
+            )
+            .await,
+        );
+
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
@@ -765,6 +800,9 @@ async fn initialize_agents(
             messaging_manager: None,
             api_event_tx: Some(api_state.event_tx.clone()),
             document_search: Some(document_search),
+            sandbox,
+            links: agent_links.clone(),
+            agent_names: agent_name_map.clone(),
         };
 
         let agent = spacebot::Agent {
@@ -788,6 +826,7 @@ async fn initialize_agents(
         let mut mcp_managers = std::collections::HashMap::new();
         let mut agent_workspaces = std::collections::HashMap::new();
         let mut runtime_configs = std::collections::HashMap::new();
+        let mut sandboxes = std::collections::HashMap::new();
         for (agent_id, agent) in agents.iter() {
             let event_rx = agent.deps.event_tx.subscribe();
             api_state.register_agent_events(agent_id.to_string(), event_rx);
@@ -796,9 +835,12 @@ async fn initialize_agents(
             mcp_managers.insert(agent_id.to_string(), agent.deps.mcp_manager.clone());
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());
             runtime_configs.insert(agent_id.to_string(), agent.deps.runtime_config.clone());
+            sandboxes.insert(agent_id.to_string(), agent.deps.sandbox.clone());
             agent_configs.push(spacebot::api::AgentInfo {
                 id: agent.config.id.clone(),
                 group: agent.config.group.clone(),
+                display_name: agent.config.display_name.clone(),
+                role: agent.config.role.clone(),
                 workspace: agent.config.workspace.clone(),
                 context_window: agent.config.context_window,
                 max_turns: agent.config.max_turns,
@@ -812,6 +854,7 @@ async fn initialize_agents(
         api_state.set_mcp_managers(mcp_managers);
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
+        api_state.set_sandboxes(sandboxes);
         api_state.set_instance_dir(config.instance_dir.clone());
     }
 
@@ -1117,6 +1160,7 @@ async fn initialize_agents(
                 api_state.event_tx.clone(),
                 agent.deps.document_search.clone(),
                 Some(worker_channel_state.clone()),
+                agent.deps.sandbox.clone(),
             );
 
             api_state

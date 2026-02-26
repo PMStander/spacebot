@@ -1402,6 +1402,17 @@ export const api = {
 		}
 		return response.json() as Promise<OpenAiOAuthBrowserStatusResponse>;
 	},
+	openUrl: async (url: string) => {
+		const response = await fetch(`${API_BASE}/system/open-url`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ url }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean }>;
+	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${API_BASE}/providers/${encodeURIComponent(provider)}`, {
 			method: "DELETE",

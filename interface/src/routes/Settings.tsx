@@ -507,11 +507,10 @@ export function Settings() {
 
 	const handleOpenDeviceLogin = () => {
 		if (!deviceCodeInfo || !deviceCodeCopied) return;
-		window.open(
-			deviceCodeInfo.verificationUrl,
-			"spacebot-openai-device",
-			"popup=true,width=780,height=960,noopener,noreferrer",
-		);
+		api.openUrl(deviceCodeInfo.verificationUrl).catch(() => {
+			// Fallback to window.open if the backend endpoint is unavailable
+			window.open(deviceCodeInfo.verificationUrl, "_blank");
+		});
 	};
 
 	const handleClose = () => {

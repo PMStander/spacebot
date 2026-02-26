@@ -21,6 +21,8 @@ echo ""
 if [ "$1" = "--release" ]; then
   CARGO_PROFILE="release"
   TARGET_DIR="release"
+  echo "Cleaning old artifacts before release build..."
+  cargo clean --manifest-path "$SCRIPT_DIR/src-tauri/Cargo.toml" --release
   echo "Building Tauri app (release — with LTO, will be slow)..."
 else
   CARGO_PROFILE="dev-fast"
