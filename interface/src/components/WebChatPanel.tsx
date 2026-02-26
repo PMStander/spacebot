@@ -1,19 +1,54 @@
-import { useEffect, useRef, useState } from "react";
-import { useWebChat, type ToolActivity } from "@/hooks/useWebChat";
-import { api, type WebChatAttachmentRef } from "@/api/client";
-import type { ActiveWorker } from "@/hooks/useChannelLiveState";
-import { useLiveContext } from "@/hooks/useLiveContext";
-import { Markdown } from "@/components/Markdown";
-import { Button } from "@/ui";
-import { Add01Icon, Cancel01Icon, PlusSignIcon, FloppyDiskIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
-import { useNavigate } from "@tanstack/react-router";
+import {useEffect, useMemo, useRef, useState} from "react";
+import {
+	useWebChat,
+	getPortalChatSessionId,
+	type ToolActivity,
+} from "@/hooks/useWebChat";
+import type {ActiveWorker} from "@/hooks/useChannelLiveState";
+import {useLiveContext} from "@/hooks/useLiveContext";
+import {Markdown} from "@/components/Markdown";
 
 interface WebChatPanelProps {
 	agentId: string;
 }
 
-function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
+const ASSISTANT_DUPLICATE_WINDOW_MS = 12_000;
+const ASSISTANT_FINGERPRINT_TTL_MS = 30_000;
+
+function normalizeAssistantContent(content: string) {
+	return content.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function rememberAssistantContent(
+	fingerprints: Map<string, number>,
+	content: string,
+	now: number,
+) {
+	const fingerprint = normalizeAssistantContent(content);
+	if (!fingerprint) return;
+	fingerprints.set(fingerprint, now);
+}
+
+function isRecentAssistantDuplicate(
+	fingerprints: Map<string, number>,
+	content: string,
+	now: number,
+) {
+	const fingerprint = normalizeAssistantContent(content);
+	if (!fingerprint) return false;
+	const seenAt = fingerprints.get(fingerprint);
+	return seenAt !== undefined && now - seenAt < ASSISTANT_DUPLICATE_WINDOW_MS;
+}
+
+function pruneAssistantFingerprints(fingerprints: Map<string, number>, now: number) {
+	for (const [fingerprint, seenAt] of fingerprints.entries()) {
+		if (now - seenAt > ASSISTANT_FINGERPRINT_TTL_MS) {
+			fingerprints.delete(fingerprint);
+		}
+	}
+}
+
+function ToolActivityIndicator({activity}: {activity: ToolActivity[]}) {
 	if (activity.length === 0) return null;
 
 	return (
@@ -28,7 +63,9 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 					) : (
 						<span className="h-1.5 w-1.5 rounded-full bg-green-400" />
 					)}
-					<span className="font-mono text-tiny text-ink-faint">{tool.tool}</span>
+					<span className="font-mono text-tiny text-ink-faint">
+						{tool.tool}
+					</span>
 				</span>
 			))}
 		</div>
@@ -45,7 +82,7 @@ function ThinkingIndicator() {
 	);
 }
 
-function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
+function ActiveWorkersPanel({workers}: {workers: ActiveWorker[]}) {
 	if (workers.length === 0) return null;
 
 	return (
@@ -58,12 +95,19 @@ function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 			</div>
 			<div className="flex flex-col gap-1.5">
 				{workers.map((worker) => (
-					<div key={worker.id} className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
+					<div
+						key={worker.id}
+						className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny"
+					>
 						<span className="font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-ink-dull">{worker.task}</span>
+						<span className="min-w-0 flex-1 truncate text-ink-dull">
+							{worker.task}
+						</span>
 						<span className="shrink-0 text-ink-faint">{worker.status}</span>
 						{worker.currentTool && (
-							<span className="max-w-40 shrink-0 truncate text-amber-400/80">{worker.currentTool}</span>
+							<span className="max-w-40 shrink-0 truncate text-amber-400/80">
+								{worker.currentTool}
+							</span>
 						)}
 					</div>
 				))}
@@ -72,126 +116,175 @@ function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 	);
 }
 
-export function WebChatPanel({ agentId }: WebChatPanelProps) {
-	const { messages, sessionId, isStreaming, error, toolActivity, sendMessage, clearChat } = useWebChat(agentId);
-	const { liveStates } = useLiveContext();
-	const navigate = useNavigate();
-	const [input, setInput] = useState("");
-	const [pendingAttachments, setPendingAttachments] = useState<WebChatAttachmentRef[]>([]);
-	const [isUploading, setIsUploading] = useState(false);
-	const [uploadError, setUploadError] = useState<string | null>(null);
-	const [isSaving, setIsSaving] = useState(false);
-	const messagesEndRef = useRef<HTMLDivElement>(null);
-	const inputRef = useRef<HTMLInputElement>(null);
-	const fileInputRef = useRef<HTMLInputElement>(null);
-	// sessionId comes from the hook
-	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
-	const hasActiveWorkers = activeWorkers.length > 0;
+function FloatingChatInput({
+	value,
+	onChange,
+	onSubmit,
+	isStreaming,
+	agentId,
+}: {
+	value: string;
+	onChange: (value: string) => void;
+	onSubmit: () => void;
+	isStreaming: boolean;
+	agentId: string;
+}) {
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
 	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-	}, [messages.length, isStreaming, toolActivity.length, activeWorkers.length]);
-
-	useEffect(() => {
-		inputRef.current?.focus();
+		textareaRef.current?.focus();
 	}, []);
 
-	const handleSaveToChats = async () => {
-		if (messages.length === 0 || isSaving) return;
-		setIsSaving(true);
-		try {
-			const firstUserMsg = messages.find((m) => m.role === "user");
-			const title = firstUserMsg
-				? firstUserMsg.content.slice(0, 50) + (firstUserMsg.content.length > 50 ? "..." : "")
-				: "Saved Chat";
-			const channel = await api.createChannel(agentId, title);
-			navigate({
-				to: "/agents/$agentId/chats/$channelId",
-				params: { agentId, channelId: channel.id },
-			});
-		} catch (err) {
-			console.warn("Failed to save chat:", err);
-		} finally {
-			setIsSaving(false);
+	useEffect(() => {
+		const textarea = textareaRef.current;
+		if (!textarea) return;
+
+		const adjustHeight = () => {
+			textarea.style.height = "auto";
+			const scrollHeight = textarea.scrollHeight;
+			const maxHeight = 200;
+			textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+			textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
+		};
+
+		adjustHeight();
+		textarea.addEventListener("input", adjustHeight);
+		return () => textarea.removeEventListener("input", adjustHeight);
+	}, [value]);
+
+	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (event.key === "Enter" && !event.shiftKey) {
+			event.preventDefault();
+			onSubmit();
 		}
-	};
-
-	const handleSubmit = (event: React.FormEvent) => {
-		event.preventDefault();
-		const trimmed = input.trim();
-		if ((!trimmed && pendingAttachments.length === 0) || isStreaming || isUploading) return;
-
-		if (trimmed === "/clear" || trimmed === "/new") {
-			setInput("");
-			clearChat();
-			return;
-		}
-
-		setInput("");
-		setUploadError(null);
-		sendMessage(trimmed, pendingAttachments);
-		setPendingAttachments([]);
-	};
-
-	const handlePickFiles = () => {
-		if (isUploading || isStreaming) return;
-		fileInputRef.current?.click();
-	};
-
-	const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-		const files = Array.from(event.target.files ?? []);
-		event.target.value = "";
-		if (files.length === 0) return;
-
-		setUploadError(null);
-		setIsUploading(true);
-		try {
-			const response = await api.webChatUpload(agentId, files);
-			setPendingAttachments((previous) => [...previous, ...response.attachments]);
-		} catch (uploadError) {
-			const message = uploadError instanceof Error ? uploadError.message : "Upload failed";
-			setUploadError(message);
-		} finally {
-			setIsUploading(false);
-		}
-	};
-
-	const removeAttachment = (indexToRemove: number) => {
-		setPendingAttachments((previous) =>
-			previous.filter((_, index) => index !== indexToRemove),
-		);
 	};
 
 	return (
-		<div className="flex h-full w-full flex-col">
-			{/* Header */}
-			<div className="flex h-12 items-center justify-between border-b border-app-line/50 px-4">
-				<span className="text-sm font-medium text-ink">Chat</span>
-				<div className="flex items-center gap-1">
-					{messages.length > 0 && (
-						<Button
-							onClick={handleSaveToChats}
-							disabled={isSaving}
-							variant="ghost"
-							size="icon"
-							className="h-7 w-7"
-							title="Save to Chats"
+		<div className="absolute inset-x-0 bottom-0 flex justify-center px-4 pb-4 pt-8 bg-gradient-to-t from-app via-app/80 to-transparent pointer-events-none">
+			<div className="w-full max-w-2xl pointer-events-auto">
+				<div className="rounded-2xl border border-app-line/50 bg-app-box/40 backdrop-blur-xl shadow-xl transition-colors duration-200 hover:border-app-line/70">
+					<div className="flex items-end gap-2 p-3">
+						<textarea
+							ref={textareaRef}
+							value={value}
+							onChange={(event) => onChange(event.target.value)}
+							onKeyDown={handleKeyDown}
+							placeholder={
+								isStreaming
+									? "Waiting for response..."
+									: `Message ${agentId}...`
+							}
+							disabled={isStreaming}
+							rows={1}
+							className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
+							style={{maxHeight: "200px"}}
+						/>
+						<button
+							type="button"
+							onClick={onSubmit}
+							disabled={isStreaming || !value.trim()}
+							className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
 						>
-							<HugeiconsIcon icon={FloppyDiskIcon} className="h-3.5 w-3.5" />
-						</Button>
-					)}
-					<Button
-						onClick={clearChat}
-						variant="ghost"
-						size="icon"
-						className="h-7 w-7"
-						title="New chat (/clear)"
-					>
-						<HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
-					</Button>
+							<svg
+								width="16"
+								height="16"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								strokeWidth="2"
+								strokeLinecap="round"
+								strokeLinejoin="round"
+							>
+								<path d="M12 19V5M5 12l7-7 7 7" />
+							</svg>
+						</button>
+					</div>
 				</div>
 			</div>
+		</div>
+	);
+}
 
+export function WebChatPanel({agentId}: WebChatPanelProps) {
+	const {messages, isStreaming, error, toolActivity, sendMessage} =
+		useWebChat(agentId);
+	const {liveStates} = useLiveContext();
+	const [input, setInput] = useState("");
+	const [sseMessages, setSseMessages] = useState<{id: string; role: "assistant"; content: string}[]>([]);
+	const messagesEndRef = useRef<HTMLDivElement>(null);
+	const sessionId = getPortalChatSessionId(agentId);
+	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
+	const hasActiveWorkers = activeWorkers.length > 0;
+	const recentAssistantFingerprintsRef = useRef(new Map<string, number>());
+	const fingerprintedMessageIdsRef = useRef(new Set<string>());
+
+	// Pick up assistant messages from the global SSE stream that arrived
+	// after the webchat request SSE closed (e.g. worker completion retriggers).
+	const timeline = liveStates[sessionId]?.timeline;
+	const seenIdsRef = useRef(new Set<string>());
+	useEffect(() => {
+		if (!timeline) return;
+		const now = Date.now();
+		pruneAssistantFingerprints(recentAssistantFingerprintsRef.current, now);
+
+		// Seed seen IDs from webchat messages so we don't duplicate
+		for (const m of messages) {
+			seenIdsRef.current.add(m.id);
+			if (m.role === "assistant" && !fingerprintedMessageIdsRef.current.has(m.id)) {
+				fingerprintedMessageIdsRef.current.add(m.id);
+				rememberAssistantContent(recentAssistantFingerprintsRef.current, m.content, now);
+			}
+		}
+
+		const newMessages: {id: string; role: "assistant"; content: string}[] = [];
+		for (const item of timeline) {
+			if (
+				item.type === "message" &&
+				item.role === "assistant" &&
+				!seenIdsRef.current.has(item.id)
+			) {
+				seenIdsRef.current.add(item.id);
+				if (isRecentAssistantDuplicate(recentAssistantFingerprintsRef.current, item.content, now)) {
+					continue;
+				}
+				fingerprintedMessageIdsRef.current.add(item.id);
+				rememberAssistantContent(recentAssistantFingerprintsRef.current, item.content, now);
+				newMessages.push({
+					id: item.id,
+					role: "assistant",
+					content: item.content,
+				});
+			}
+		}
+		if (newMessages.length > 0) {
+			setSseMessages((prev) => [...prev, ...newMessages]);
+		}
+	}, [timeline, messages]);
+
+	// Clear SSE messages when a new webchat send starts (they'll be in history on next load)
+	useEffect(() => {
+		if (isStreaming) setSseMessages([]);
+	}, [isStreaming]);
+
+	const allMessages = useMemo(() => {
+		const messageIds = new Set(messages.map((message) => message.id));
+		const dedupedSse = sseMessages.filter((message) => !messageIds.has(message.id));
+		return [...messages, ...dedupedSse];
+	}, [messages, sseMessages]);
+
+	useEffect(() => {
+		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
+	}, [allMessages.length, isStreaming, toolActivity.length, activeWorkers.length]);
+
+	const handleSubmit = () => {
+		const trimmed = input.trim();
+		if (!trimmed || isStreaming) return;
+		setInput("");
+		sendMessage(trimmed);
+	};
+
+	return (
+		<div className="relative flex h-full w-full flex-col">
 			{/* Messages */}
 			<div className="flex-1 overflow-y-auto">
 				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
@@ -201,7 +294,7 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 						</div>
 					)}
 
-					{messages.length === 0 && !isStreaming && (
+					{allMessages.length === 0 && !isStreaming && (
 						<div className="flex flex-col items-center justify-center py-24">
 							<p className="text-sm text-ink-faint">
 								Start a conversation with {agentId}
@@ -209,7 +302,7 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 						</div>
 					)}
 
-					{messages.map((message) => (
+					{allMessages.map((message) => (
 						<div key={message.id}>
 							{message.role === "user" ? (
 								<div className="flex justify-end">
@@ -225,18 +318,21 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 						</div>
 					))}
 
-					{/* Streaming state */}
-					{isStreaming && messages[messages.length - 1]?.role !== "assistant" && (
-						<div>
-							<ToolActivityIndicator activity={toolActivity} />
-							{toolActivity.length === 0 && <ThinkingIndicator />}
-						</div>
-					)}
+				{/* Streaming state */}
+				{isStreaming &&
+						allMessages[allMessages.length - 1]?.role !== "assistant" && (
+							<div>
+								<ToolActivityIndicator activity={toolActivity} />
+								{toolActivity.length === 0 && <ThinkingIndicator />}
+							</div>
+						)}
 
-					{/* Inline tool activity during streaming assistant message */}
-					{isStreaming && messages[messages.length - 1]?.role === "assistant" && toolActivity.length > 0 && (
-						<ToolActivityIndicator activity={toolActivity} />
-					)}
+				{/* Inline tool activity during streaming assistant message */}
+				{isStreaming &&
+						allMessages[allMessages.length - 1]?.role === "assistant" &&
+						toolActivity.length > 0 && (
+							<ToolActivityIndicator activity={toolActivity} />
+						)}
 
 					{error && (
 						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
@@ -247,80 +343,14 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 				</div>
 			</div>
 
-			{/* Input */}
-			<form onSubmit={handleSubmit} className="border-t border-app-line/50 p-3">
-				<input
-					ref={fileInputRef}
-					type="file"
-					multiple
-					accept="image/png,image/jpeg,image/gif,image/webp,text/*,application/json,application/xml,application/javascript,application/typescript,application/toml,application/yaml,application/pdf,audio/mpeg,audio/wav,audio/ogg,audio/webm"
-					className="hidden"
-					onChange={handleFileChange}
-				/>
-				{pendingAttachments.length > 0 && (
-					<div className="mb-2 flex flex-wrap gap-1.5">
-						{pendingAttachments.map((attachment, index) => (
-							<div
-								key={`${attachment.path}-${index}`}
-								className="flex items-center gap-1 rounded border border-app-line bg-app-darkBox px-2 py-1 text-tiny text-ink-faint"
-							>
-								<span className="max-w-56 truncate">{attachment.filename}</span>
-								<button
-									type="button"
-									onClick={() => removeAttachment(index)}
-									className="text-ink-faint transition-colors hover:text-ink"
-									aria-label={`Remove ${attachment.filename}`}
-								>
-									<HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3" />
-								</button>
-							</div>
-						))}
-					</div>
-				)}
-				<div className="flex gap-2">
-					<Button
-						type="button"
-						onClick={handlePickFiles}
-						disabled={isStreaming || isUploading}
-						size="sm"
-						variant="ghost"
-						className="px-2"
-						title="Upload files"
-					>
-						<HugeiconsIcon icon={Add01Icon} className="h-3.5 w-3.5" />
-					</Button>
-					<input
-						ref={inputRef}
-						type="text"
-						value={input}
-						onChange={(event) => setInput(event.target.value)}
-						placeholder={
-							isStreaming
-								? "Waiting for response..."
-								: isUploading
-									? "Uploading files..."
-									: `Message ${agentId}... · /clear to reset`
-						}
-						disabled={isStreaming || isUploading}
-						className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-emerald-500/50 focus:outline-none disabled:opacity-50"
-					/>
-					<Button
-						type="submit"
-						disabled={
-							isStreaming
-								|| isUploading
-								|| (!input.trim() && pendingAttachments.length === 0)
-						}
-						size="sm"
-						className="bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30"
-					>
-						Send
-					</Button>
-				</div>
-				{uploadError && (
-					<p className="mt-2 text-tiny text-red-400">{uploadError}</p>
-				)}
-			</form>
+			{/* Floating input */}
+			<FloatingChatInput
+				value={input}
+				onChange={setInput}
+				onSubmit={handleSubmit}
+				isStreaming={isStreaming}
+				agentId={agentId}
+			/>
 		</div>
 	);
 }

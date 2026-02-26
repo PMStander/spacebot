@@ -11,6 +11,7 @@ use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::webchat::WebChatAdapter;
 use crate::prompts::PromptEngine;
+use crate::tasks::TaskStore;
 use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
 
@@ -66,6 +67,8 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
+    /// Per-agent task stores for task CRUD operations.
+    pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Per-agent MCP managers for status and reconnect APIs.
@@ -138,6 +141,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         worker_id: String,
         task: String,
+        worker_type: String,
     },
     /// A worker's status changed.
     WorkerStatusUpdate {
@@ -152,6 +156,7 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         worker_id: String,
         result: String,
+        success: bool,
     },
     /// A branch was started.
     BranchStarted {
@@ -174,6 +179,7 @@ pub enum ApiEvent {
         process_type: String,
         process_id: String,
         tool_name: String,
+        args: String,
     },
     /// A tool call completed on a process.
     ToolCompleted {
@@ -182,6 +188,7 @@ pub enum ApiEvent {
         process_type: String,
         process_id: String,
         tool_name: String,
+        result: String,
     },
     /// Configuration was reloaded (skills, identity, etc.).
     ConfigReloaded,
@@ -217,6 +224,14 @@ pub enum ApiEvent {
         link_id: String,
         channel_id: String,
     },
+    /// A task was created, updated, or deleted.
+    TaskUpdated {
+        agent_id: String,
+        task_number: i64,
+        status: String,
+        /// "created", "updated", or "deleted".
+        action: String,
+    },
 }
 
 impl ApiState {
@@ -240,6 +255,7 @@ impl ApiState {
             config_path: RwLock::new(PathBuf::new()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             sandboxes: ArcSwap::from_pointee(HashMap::new()),
@@ -308,6 +324,7 @@ impl ApiState {
                                 worker_id,
                                 channel_id,
                                 task,
+                                worker_type,
                                 ..
                             } => {
                                 api_tx
@@ -316,6 +333,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         worker_id: worker_id.to_string(),
                                         task: task.clone(),
+                                        worker_type: worker_type.clone(),
                                     })
                                     .ok();
                             }
@@ -353,6 +371,7 @@ impl ApiState {
                                 worker_id,
                                 channel_id,
                                 result,
+                                success,
                                 ..
                             } => {
                                 api_tx
@@ -361,6 +380,7 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         worker_id: worker_id.to_string(),
                                         result: result.clone(),
+                                        success: *success,
                                     })
                                     .ok();
                             }
@@ -383,6 +403,7 @@ impl ApiState {
                                 process_id,
                                 channel_id,
                                 tool_name,
+                                args,
                                 ..
                             } => {
                                 let (process_type, id_str) = process_id_info(process_id);
@@ -393,6 +414,7 @@ impl ApiState {
                                         process_type,
                                         process_id: id_str,
                                         tool_name: tool_name.clone(),
+                                        args: args.clone(),
                                     })
                                     .ok();
                             }
@@ -400,6 +422,7 @@ impl ApiState {
                                 process_id,
                                 channel_id,
                                 tool_name,
+                                result,
                                 ..
                             } => {
                                 let (process_type, id_str) = process_id_info(process_id);
@@ -410,6 +433,7 @@ impl ApiState {
                                         process_type,
                                         process_id: id_str,
                                         tool_name: tool_name.clone(),
+                                        result: result.clone(),
                                     })
                                     .ok();
                             }
@@ -442,6 +466,21 @@ impl ApiState {
                                         to_agent_id: to_agent_id.to_string(),
                                         link_id: link_id.clone(),
                                         channel_id: channel_id.to_string(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::TaskUpdated {
+                                task_number,
+                                status,
+                                action,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::TaskUpdated {
+                                        agent_id: agent_id.clone(),
+                                        task_number: *task_number,
+                                        status: status.clone(),
+                                        action: action.clone(),
                                     })
                                     .ok();
                             }
@@ -496,6 +535,11 @@ impl ApiState {
     /// Set the cron schedulers for all agents.
     pub fn set_cron_schedulers(&self, schedulers: HashMap<String, Arc<Scheduler>>) {
         self.cron_schedulers.store(Arc::new(schedulers));
+    }
+
+    /// Set the task stores for all agents.
+    pub fn set_task_stores(&self, stores: HashMap<String, Arc<TaskStore>>) {
+        self.task_stores.store(Arc::new(stores));
     }
 
     /// Set the runtime configs for all agents.

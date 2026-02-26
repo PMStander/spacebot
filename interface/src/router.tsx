@@ -1,4 +1,4 @@
-import {useMemo, useState} from "react";
+import {useState} from "react";
 import {
 	createRouter,
 	createRootRoute,
@@ -13,18 +13,16 @@ import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
 import {AgentDetail} from "@/routes/AgentDetail";
 import {AgentChannels} from "@/routes/AgentChannels";
-import {AgentChats} from "@/routes/AgentChats";
 import {AgentCortex} from "@/routes/AgentCortex";
 import {ChannelDetail} from "@/routes/ChannelDetail";
 import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
 import {AgentIngest} from "@/routes/AgentIngest";
-import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentSkills} from "@/routes/AgentSkills";
+import {AgentWorkers} from "@/routes/AgentWorkers";
+import {AgentTasks} from "@/routes/AgentTasks";
 import {AgentChat} from "@/routes/AgentChat";
-import {AgentCanvas} from "@/routes/AgentCanvas";
-import {AgentArtifacts} from "@/routes/AgentArtifacts";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
@@ -53,64 +51,10 @@ function RootLayout() {
 }
 
 function AgentHeader({agentId}: {agentId: string}) {
-	const {liveStates, channels} = useLiveContext();
-
-	const activity = useMemo(() => {
-		let workers = 0;
-		let branches = 0;
-		let typing = 0;
-		for (const ch of channels) {
-			if (ch.agent_id !== agentId) continue;
-			const live = liveStates[ch.id];
-			if (!live) continue;
-			workers += Object.keys(live.workers).length;
-			branches += Object.keys(live.branches).length;
-			if (live.isTyping) typing++;
-		}
-		return {workers, branches, typing};
-	}, [channels, liveStates, agentId]);
-
-	const isActive = activity.workers > 0 || activity.branches > 0 || activity.typing > 0;
-
 	return (
 		<>
 			<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 				<h1 className="font-plex text-sm font-medium text-ink">{agentId}</h1>
-
-				<div className="ml-auto flex items-center gap-3">
-					{activity.workers > 0 && (
-						<div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-xs">
-							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-							<span className="font-medium tabular-nums text-amber-400">
-								{activity.workers} worker{activity.workers !== 1 ? "s" : ""}
-							</span>
-						</div>
-					)}
-					{activity.branches > 0 && (
-						<div className="flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-1 text-xs">
-							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-							<span className="font-medium tabular-nums text-violet-400">
-								{activity.branches} branch{activity.branches !== 1 ? "es" : ""}
-							</span>
-						</div>
-					)}
-					{activity.typing > 0 && (
-						<div className="flex items-center gap-1.5 rounded-full bg-accent/10 px-2.5 py-1 text-xs">
-							<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-							<span className="font-medium text-accent">typing</span>
-						</div>
-					)}
-					<div className="flex items-center gap-1.5">
-						<div
-							className={`h-2 w-2 rounded-full ${
-								isActive ? "animate-pulse bg-amber-400" : "bg-green-500/60"
-							}`}
-						/>
-						<span className="text-xs text-ink-faint">
-							{isActive ? "Active" : "Idle"}
-						</span>
-					</div>
-				</div>
 			</header>
 			<AgentTabs agentId={agentId} />
 		</>
@@ -193,38 +137,6 @@ const agentChatRoute = createRoute({
 	},
 });
 
-const agentCanvasRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/canvas",
-	component: function AgentCanvasPage() {
-		const {agentId} = agentCanvasRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentHeader agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentCanvas agentId={agentId} />
-				</div>
-			</div>
-		);
-	},
-});
-
-const agentArtifactsRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/artifacts",
-	component: function AgentArtifactsPage() {
-		const {agentId} = agentArtifactsRoute.useParams();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentHeader agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentArtifacts agentId={agentId} />
-				</div>
-			</div>
-		);
-	},
-});
-
 const agentChannelsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/channels",
@@ -236,47 +148,6 @@ const agentChannelsRoute = createRoute({
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
 					<AgentChannels agentId={agentId} liveStates={liveStates} />
-				</div>
-			</div>
-		);
-	},
-});
-
-const agentChatsRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/chats",
-	component: function AgentChatsPage() {
-		const {agentId} = agentChatsRoute.useParams();
-		const {liveStates} = useLiveContext();
-		return (
-			<div className="flex h-full flex-col">
-				<AgentHeader agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<AgentChats agentId={agentId} liveStates={liveStates} />
-				</div>
-			</div>
-		);
-	},
-});
-
-const chatDetailRoute = createRoute({
-	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/chats/$channelId",
-	component: function ChatDetailPage() {
-		const {agentId, channelId} = chatDetailRoute.useParams();
-		const {liveStates, channels, loadOlderMessages} = useLiveContext();
-		const channel = channels.find((c) => c.id === channelId);
-		return (
-			<div className="flex h-full flex-col">
-				<AgentHeader agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
-					<ChannelDetail
-						agentId={agentId}
-						channelId={channelId}
-						channel={channel}
-						liveState={liveStates[channelId]}
-						onLoadMore={() => loadOlderMessages(channelId)}
-					/>
 				</div>
 			</div>
 		);
@@ -318,14 +189,32 @@ const agentIngestRoute = createRoute({
 const agentWorkersRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/workers",
+	validateSearch: (search: Record<string, unknown>): {worker?: string} => ({
+		worker: typeof search.worker === "string" ? search.worker : undefined,
+	}),
 	component: function AgentWorkersPage() {
 		const {agentId} = agentWorkersRoute.useParams();
-		const {liveStates} = useLiveContext();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentWorkers agentId={agentId} liveStates={liveStates} />
+					<AgentWorkers agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
+const agentTasksRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/tasks",
+	component: function AgentTasksPage() {
+		const {agentId} = agentTasksRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentTasks agentId={agentId} />
 				</div>
 			</div>
 		);
@@ -431,14 +320,11 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	agentRoute,
 	agentChatRoute,
-	agentCanvasRoute,
-	agentArtifactsRoute,
 	agentChannelsRoute,
-	agentChatsRoute,
-	chatDetailRoute,
 	agentMemoriesRoute,
 	agentIngestRoute,
 	agentWorkersRoute,
+	agentTasksRoute,
 	agentCortexRoute,
 	agentSkillsRoute,
 	agentCronRoute,

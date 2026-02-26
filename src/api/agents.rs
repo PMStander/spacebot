@@ -362,6 +362,7 @@ pub(super) async fn trigger_warmup(
     let mcp_managers = state.mcp_managers.load();
     let pools = state.agent_pools.load();
     let sandboxes = state.sandboxes.load();
+    let task_stores = state.task_stores.load();
 
     let runtime_config_ids = runtime_configs.keys().cloned().collect::<HashSet<_>>();
     let memory_search_ids = memory_searches.keys().cloned().collect::<HashSet<_>>();
@@ -392,6 +393,10 @@ pub(super) async fn trigger_warmup(
         let Some(sandbox) = sandboxes.get(agent_id).cloned() else {
             continue;
         };
+        let task_store = task_stores
+            .get(agent_id)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(crate::tasks::TaskStore::new(sqlite_pool.clone())));
 
         let llm_manager = llm_manager.clone();
         let force = request.force;
@@ -411,6 +416,7 @@ pub(super) async fn trigger_warmup(
                 messaging_manager: None,
                 document_search: None,
                 sandbox,
+                task_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
             };
@@ -596,6 +602,7 @@ pub(super) async fn create_agent(
         embedding_table,
         embedding_model.clone(),
     ));
+    let task_store = std::sync::Arc::new(crate::tasks::TaskStore::new(db.sqlite.clone()));
 
     let vector_config = crate::vector::VectorConfig::default();
     let (document_search, document_index_stats) = crate::vector::initialize_document_search(
@@ -699,6 +706,7 @@ pub(super) async fn create_agent(
         memory_search: memory_search.clone(),
         llm_manager,
         mcp_manager: mcp_manager.clone(),
+        task_store: task_store.clone(),
         cron_tool: None,
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
@@ -762,11 +770,14 @@ pub(super) async fn create_agent(
     let conversation_logger =
         crate::conversation::history::ConversationLogger::new(db.sqlite.clone());
     let channel_store = crate::conversation::ChannelStore::new(db.sqlite.clone());
-
+    let run_logger = crate::conversation::ProcessRunLogger::new(db.sqlite.clone());
     let cortex_tool_server = crate::tools::create_cortex_chat_tool_server(
+        deps.agent_id.clone(),
+        deps.task_store.clone(),
         memory_search.clone(),
         conversation_logger,
         channel_store,
+        run_logger,
         browser_config,
         agent_config.screenshot_dir(),
         brave_search_key,
@@ -792,6 +803,10 @@ pub(super) async fn create_agent(
         crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
     let _association_loop =
         crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
+    crate::agent::cortex::spawn_ready_task_loop(
+        deps.clone(),
+        crate::agent::cortex::CortexLogger::new(db.sqlite.clone()),
+    );
 
     let ingestion_config = **runtime_config.ingestion.load();
     if ingestion_config.enabled {
@@ -819,6 +834,10 @@ pub(super) async fn create_agent(
         let mut searches = (**state.memory_searches.load()).clone();
         searches.insert(agent_id.clone(), memory_search);
         state.memory_searches.store(std::sync::Arc::new(searches));
+
+        let mut task_stores = (**state.task_stores.load()).clone();
+        task_stores.insert(agent_id.clone(), task_store);
+        state.task_stores.store(std::sync::Arc::new(task_stores));
 
         let mut workspaces = (**state.agent_workspaces.load()).clone();
         workspaces.insert(agent_id.clone(), agent_config.workspace.clone());

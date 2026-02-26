@@ -3,12 +3,19 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
 import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
+import { TagInput } from "@/components/TagInput";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
 
-type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "skills";
+function supportsAdaptiveThinking(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return id.includes("opus-4-6") || id.includes("opus-4.6")
+		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
+}
+
+type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "sandbox";
 
 const SECTIONS: {
 	id: SectionId;
@@ -27,7 +34,7 @@ const SECTIONS: {
 	{ id: "coalesce", label: "Coalesce", group: "config", description: "Message batching", detail: "When multiple messages arrive in quick succession, coalescing batches them into a single LLM turn. This prevents the agent from responding to each message individually in fast-moving conversations." },
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
-	{ id: "skills", label: "Skills", group: "config", description: "Loaded skill definitions", detail: "Skills are directories containing a SKILL.md file with instructions. They are loaded from instance-level and workspace-level skills directories. Workspace skills override instance skills with the same name. Skills are managed on disk, not via the API." },
+	{ id: "sandbox", label: "Sandbox", group: "config", description: "Process containment", detail: "OS-level filesystem containment for shell and exec tool subprocesses. When enabled, worker processes run inside a kernel-enforced sandbox (bubblewrap on Linux, sandbox-exec on macOS) that makes the entire filesystem read-only except for the workspace and any configured writable paths. On hosted deployments, sandbox mode is always enforced." },
 ];
 
 interface AgentConfigProps {
@@ -45,13 +52,6 @@ const getIdentityField = (data: { soul: string | null; identity: string | null; 
 	return null;
 };
 
-/** Check if a model ID supports adaptive thinking (extended thinking / reasoning). */
-const supportsAdaptiveThinking = (modelId: string): boolean => {
-	if (!modelId) return false;
-	const lower = modelId.toLowerCase();
-	return lower.includes("claude") || lower.includes("deepseek-r") || lower.includes("o1") || lower.includes("o3") || lower.includes("gemini-2.5");
-};
-
 export function AgentConfig({ agentId }: AgentConfigProps) {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
@@ -64,7 +64,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab) {
-			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser", "skills"];
+			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser", "sandbox"];
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
 			}
@@ -105,9 +105,32 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 	const configMutation = useMutation({
 		mutationFn: (update: AgentConfigUpdateRequest) => api.updateAgentConfig(update),
-		onMutate: () => setSaving(true),
+		onMutate: (update) => {
+			setSaving(true);
+			// Optimistically merge the sent values into the cache so the UI
+			// reflects the change immediately (covers fields the backend
+			// doesn't yet return in its response, like sandbox).
+			const previous = queryClient.getQueryData<AgentConfigResponse>(["agent-config", agentId]);
+			if (previous) {
+				const { agent_id: _, ...sections } = update;
+				const merged = { ...previous } as unknown as Record<string, unknown>;
+				const prev = previous as unknown as Record<string, unknown>;
+				for (const [key, value] of Object.entries(sections)) {
+					if (value !== undefined) {
+						merged[key] = {
+							...(prev[key] as Record<string, unknown> | undefined),
+							...value,
+						};
+					}
+				}
+				queryClient.setQueryData(["agent-config", agentId], merged as unknown as AgentConfigResponse);
+			}
+		},
 		onSuccess: (result) => {
-			queryClient.setQueryData(["agent-config", agentId], result);
+			// Merge server response with cache to preserve fields the backend
+			// doesn't yet return (e.g. sandbox).
+			const previous = queryClient.getQueryData<AgentConfigResponse>(["agent-config", agentId]);
+			queryClient.setQueryData(["agent-config", agentId], { ...previous, ...result });
 			setDirty(false);
 			setSaving(false);
 		},
@@ -146,7 +169,6 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 	const active = SECTIONS.find((s) => s.id === activeSection)!;
 	const isIdentitySection = active.group === "identity";
-	const isSkillsSection = active.id === "skills";
 
 	return (
 		<div className="flex h-full relative">
@@ -197,9 +219,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 			{/* Editor */}
 			<div className="flex flex-1 flex-col overflow-hidden">
-				{isSkillsSection ? (
-					<SkillsSection agentId={agentId} detail={active.detail} />
-				) : isIdentitySection ? (
+				{isIdentitySection ? (
 				<IdentityEditor
 					key={active.id}
 					label={active.label}
@@ -389,49 +409,34 @@ interface ConfigSectionEditorProps {
 	onSave: (update: Partial<AgentConfigUpdateRequest>) => void;
 }
 
-function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
-	const readRoutingMaps = () => {
-		const routing = config.routing as AgentConfigResponse["routing"] & {
-			task_overrides?: Record<string, string> | null;
-			fallbacks?: Record<string, string[]> | null;
-		};
-		return {
-			taskOverrides: { ...(routing.task_overrides ?? {}) },
-			fallbacks: structuredClone(routing.fallbacks ?? {}),
-		};
-	};
+const SANDBOX_DEFAULTS = { mode: "enabled" as const, writable_paths: [] as string[] };
 
-	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean>>(() => {
-		// Initialize from config based on section (flat scalar fields only)
+function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
+	type ConfigValues = Record<string, string | number | boolean | string[]>;
+	const sandbox = config.sandbox ?? SANDBOX_DEFAULTS;
+	const [localValues, setLocalValues] = useState<ConfigValues>(() => {
+		// Initialize from config based on section
 		switch (sectionId) {
-			case "routing": {
-				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
-				return { ...flat };
-			}
+			case "routing":
+				return { ...config.routing } as ConfigValues;
 			case "tuning":
-				return { ...config.tuning };
+				return { ...config.tuning } as ConfigValues;
 			case "compaction":
-				return { ...config.compaction };
+				return { ...config.compaction } as ConfigValues;
 			case "cortex":
-				return { ...config.cortex };
+				return { ...config.cortex } as ConfigValues;
 			case "coalesce":
-				return { ...config.coalesce };
+				return { ...config.coalesce } as ConfigValues;
 			case "memory":
-				return { ...config.memory_persistence };
+				return { ...config.memory_persistence } as ConfigValues;
 			case "browser":
-				return { ...config.browser };
+				return { ...config.browser } as ConfigValues;
+			case "sandbox":
+				return { mode: sandbox.mode, writable_paths: sandbox.writable_paths } as ConfigValues;
 			default:
 				return {};
 		}
 	});
-
-	// Nested objects for routing: task_overrides and fallbacks
-	const [taskOverrides, setTaskOverrides] = useState<Record<string, string>>(
-		() => sectionId === "routing" ? readRoutingMaps().taskOverrides : {}
-	);
-	const [fallbacks, setFallbacks] = useState<Record<string, string[]>>(
-		() => sectionId === "routing" ? readRoutingMaps().fallbacks : {}
-	);
 
 	const [localDirty, setLocalDirty] = useState(false);
 
@@ -443,14 +448,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 	useEffect(() => {
 		if (!localDirty) {
 			switch (sectionId) {
-				case "routing": {
-					const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
-					setLocalValues({ ...flat });
-					const routingMaps = readRoutingMaps();
-					setTaskOverrides(routingMaps.taskOverrides);
-					setFallbacks(routingMaps.fallbacks);
+				case "routing":
+					setLocalValues({ ...config.routing });
 					break;
-				}
 				case "tuning":
 					setLocalValues({ ...config.tuning });
 					break;
@@ -469,34 +469,28 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				case "browser":
 					setLocalValues({ ...config.browser });
 					break;
+				case "sandbox":
+					setLocalValues({ mode: sandbox.mode, writable_paths: sandbox.writable_paths });
+					break;
 			}
 		}
 	}, [config, sectionId, localDirty]);
 
-	const handleChange = useCallback((field: string, value: string | number | boolean) => {
+	const handleChange = useCallback((field: string, value: string | number | boolean | string[]) => {
 		setLocalValues((prev) => ({ ...prev, [field]: value }));
 		setLocalDirty(true);
 	}, []);
 
 	const handleSave = useCallback(() => {
-		if (sectionId === "routing") {
-			onSave({ routing: { ...localValues, task_overrides: taskOverrides, fallbacks } as any });
-		} else {
-			onSave({ [sectionId]: localValues });
-		}
+		onSave({ [sectionId]: localValues });
 		setLocalDirty(false);
-	}, [onSave, sectionId, localValues, taskOverrides, fallbacks]);
+	}, [onSave, sectionId, localValues]);
 
 	const handleRevert = useCallback(() => {
 		switch (sectionId) {
-			case "routing": {
-				const { task_overrides: _to, fallbacks: _fb, ...flat } = config.routing;
-				setLocalValues({ ...flat });
-				const routingMaps = readRoutingMaps();
-				setTaskOverrides(routingMaps.taskOverrides);
-				setFallbacks(routingMaps.fallbacks);
+			case "routing":
+				setLocalValues({ ...config.routing });
 				break;
-			}
 			case "tuning":
 				setLocalValues({ ...config.tuning });
 				break;
@@ -514,6 +508,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				break;
 			case "browser":
 				setLocalValues({ ...config.browser });
+				break;
+			case "sandbox":
+				setLocalValues({ mode: sandbox.mode, writable_paths: sandbox.writable_paths });
 				break;
 		}
 		setLocalDirty(false);
@@ -581,193 +578,6 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 							min={0}
 							suffix="s"
 						/>
-
-						{/* Task Overrides */}
-						<div className="mt-4 border-t border-app-line/30 pt-4">
-							<div className="mb-3 flex items-center justify-between">
-								<div>
-									<h4 className="text-sm font-medium text-ink">Task Overrides</h4>
-									<p className="text-tiny text-ink-faint">Override the model used for specific task types (e.g. "coding", "analysis")</p>
-								</div>
-								<Button
-									size="sm"
-									variant="ghost"
-									onClick={() => {
-										setTaskOverrides((prev) => ({ ...prev, "": "" }));
-										setLocalDirty(true);
-									}}
-								>
-									+ Add
-								</Button>
-							</div>
-							<div className="grid gap-3">
-								{Object.entries(taskOverrides).map(([taskType, model], idx) => (
-									<div key={idx} className="flex items-start gap-2">
-										<Input
-											type="text"
-											value={taskType}
-											placeholder="Task type"
-											onChange={(e) => {
-												const newKey = e.target.value;
-												setTaskOverrides((prev) => {
-													const entries = Object.entries(prev);
-													entries[idx] = [newKey, model];
-													return Object.fromEntries(entries);
-												});
-												setLocalDirty(true);
-											}}
-											className="w-36 border-app-line/50 bg-app-darkBox/30"
-										/>
-										<div className="flex-1">
-											<ModelSelect
-												value={model}
-												onChange={(v) => {
-													setTaskOverrides((prev) => {
-														const entries = Object.entries(prev);
-														entries[idx] = [taskType, v];
-														return Object.fromEntries(entries);
-													});
-													setLocalDirty(true);
-												}}
-											/>
-										</div>
-										<Button
-											size="sm"
-											variant="ghost"
-											onClick={() => {
-												setTaskOverrides((prev) => {
-													const entries = Object.entries(prev);
-													entries.splice(idx, 1);
-													return Object.fromEntries(entries);
-												});
-												setLocalDirty(true);
-											}}
-											className="mt-1 text-red-400 hover:text-red-300"
-										>
-											Remove
-										</Button>
-									</div>
-								))}
-								{Object.keys(taskOverrides).length === 0 && (
-									<p className="text-tiny text-ink-faint/50 italic">No task overrides configured</p>
-								)}
-							</div>
-						</div>
-
-						{/* Fallback Chains */}
-						<div className="mt-4 border-t border-app-line/30 pt-4">
-							<div className="mb-3 flex items-center justify-between">
-								<div>
-									<h4 className="text-sm font-medium text-ink">Fallback Chains</h4>
-									<p className="text-tiny text-ink-faint">When a model fails, try fallback models in order</p>
-								</div>
-								<Button
-									size="sm"
-									variant="ghost"
-									onClick={() => {
-										setFallbacks((prev) => ({ ...prev, "": [] }));
-										setLocalDirty(true);
-									}}
-								>
-									+ Add
-								</Button>
-							</div>
-							<div className="grid gap-4">
-								{Object.entries(fallbacks).map(([model, chain], idx) => (
-									<div key={idx} className="rounded-lg border border-app-line/30 bg-app-darkBox/10 p-3">
-										<div className="mb-2 flex items-center gap-2">
-											<span className="text-tiny font-medium text-ink-faint">Primary model:</span>
-											<div className="flex-1">
-												<ModelSelect
-													value={model}
-													onChange={(v) => {
-														setFallbacks((prev) => {
-															const entries = Object.entries(prev);
-															entries[idx] = [v, chain];
-															return Object.fromEntries(entries);
-														});
-														setLocalDirty(true);
-													}}
-												/>
-											</div>
-											<Button
-												size="sm"
-												variant="ghost"
-												onClick={() => {
-													setFallbacks((prev) => {
-														const entries = Object.entries(prev);
-														entries.splice(idx, 1);
-														return Object.fromEntries(entries);
-													});
-													setLocalDirty(true);
-												}}
-												className="text-red-400 hover:text-red-300"
-											>
-												Remove
-											</Button>
-										</div>
-										<div className="ml-4 grid gap-2">
-											{chain.map((fallbackModel, fIdx) => (
-												<div key={fIdx} className="flex items-center gap-2">
-													<span className="text-tiny text-ink-faint/50">#{fIdx + 1}</span>
-													<div className="flex-1">
-														<ModelSelect
-															value={fallbackModel}
-															onChange={(v) => {
-																setFallbacks((prev) => {
-																	const entries = Object.entries(prev);
-																	const newChain = [...entries[idx][1]];
-																	newChain[fIdx] = v;
-																	entries[idx] = [model, newChain];
-																	return Object.fromEntries(entries);
-																});
-																setLocalDirty(true);
-															}}
-														/>
-													</div>
-													<Button
-														size="sm"
-														variant="ghost"
-														onClick={() => {
-															setFallbacks((prev) => {
-																const entries = Object.entries(prev);
-																const newChain = [...entries[idx][1]];
-																newChain.splice(fIdx, 1);
-																entries[idx] = [model, newChain];
-																return Object.fromEntries(entries);
-															});
-															setLocalDirty(true);
-														}}
-														className="text-red-400 hover:text-red-300"
-													>
-														Remove
-													</Button>
-												</div>
-											))}
-											<Button
-												size="sm"
-												variant="ghost"
-												onClick={() => {
-													setFallbacks((prev) => {
-														const entries = Object.entries(prev);
-														const newChain = [...entries[idx][1], ""];
-														entries[idx] = [model, newChain];
-														return Object.fromEntries(entries);
-													});
-													setLocalDirty(true);
-												}}
-												className="w-fit"
-											>
-												+ Add fallback
-											</Button>
-										</div>
-									</div>
-								))}
-								{Object.keys(fallbacks).length === 0 && (
-									<p className="text-tiny text-ink-faint/50 italic">No fallback chains configured</p>
-								)}
-							</div>
-						</div>
 					</div>
 				);
 			}
@@ -1012,6 +822,36 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 						/>
 					</div>
 				);
+			case "sandbox":
+				return (
+					<div className="grid gap-4">
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">Mode</label>
+							<p className="text-tiny text-ink-faint">Kernel-enforced filesystem containment for shell and exec subprocesses. On hosted deployments this is always enforced regardless of this setting.</p>
+							<Select
+								value={localValues.mode as string}
+								onValueChange={(v) => handleChange("mode", v)}
+							>
+								<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="enabled">Enabled</SelectItem>
+									<SelectItem value="disabled">Disabled</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">Writable Paths</label>
+							<p className="text-tiny text-ink-faint">Additional directories workers can write to beyond the workspace. The workspace is always writable. Press Enter to add a path.</p>
+							<TagInput
+								value={(localValues.writable_paths as string[]) ?? []}
+								onChange={(paths) => handleChange("writable_paths", paths)}
+								placeholder="/home/user/projects/myapp"
+							/>
+						</div>
+					</div>
+				);
 			default:
 				return null;
 		}
@@ -1042,7 +882,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 // -- Form Field Components --
 
-/* interface ConfigFieldProps {
+interface ConfigFieldProps {
 	label: string;
 	description: string;
 	value: string;
@@ -1062,7 +902,7 @@ function ConfigField({ label, description, value, onChange }: ConfigFieldProps) 
 			/>
 		</div>
 	);
-} */
+}
 
 interface ConfigToggleFieldProps {
 	label: string;
@@ -1080,75 +920,5 @@ function ConfigToggleField({ label, description, value, onChange }: ConfigToggle
 			</div>
 			<Toggle checked={value} onCheckedChange={onChange} size="lg" />
 		</div>
-	);
-}
-
-// -- Skills Section (read-only) --
-
-function SkillsSection({ agentId, detail }: { agentId: string; detail: string }) {
-	const skillsQuery = useQuery({
-		queryKey: ["agent-skills", agentId],
-		queryFn: () => api.listSkills(agentId),
-		staleTime: 10_000,
-	});
-
-	return (
-		<>
-			<div className="flex items-center justify-between border-b border-app-line/50 bg-app-darkBox/20 px-5 py-2.5">
-				<div className="flex items-center gap-3">
-					<h3 className="text-sm font-medium text-ink">Skills</h3>
-					<span className="text-tiny text-ink-faint">Loaded skill definitions</span>
-				</div>
-				<span className="text-tiny text-ink-faint/50">Read-only &mdash; managed on disk</span>
-			</div>
-			<div className="flex-1 overflow-y-auto px-8 py-8">
-				<div className="mb-6 rounded-lg border border-app-line/30 bg-app-darkBox/20 px-5 py-4">
-					<p className="text-sm leading-relaxed text-ink-dull">{detail}</p>
-				</div>
-
-				{skillsQuery.isLoading && (
-					<div className="flex items-center gap-2 text-ink-dull">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-						Loading skills...
-					</div>
-				)}
-
-				{skillsQuery.isError && (
-					<p className="text-sm text-red-400">Failed to load skills</p>
-				)}
-
-				{skillsQuery.data && skillsQuery.data.skills.length === 0 && (
-					<p className="text-sm text-ink-faint italic">No skills loaded. Add skill directories to your instance or workspace skills/ folder.</p>
-				)}
-
-				{skillsQuery.data && skillsQuery.data.skills.length > 0 && (
-					<div className="grid gap-3">
-						{skillsQuery.data.skills.map((skill) => (
-							<div
-								key={skill.name}
-								className="rounded-lg border border-app-line/30 bg-app-darkBox/10 px-4 py-3"
-							>
-								<div className="flex items-center gap-2">
-									<span className="text-sm font-medium text-ink">{skill.name}</span>
-									<span
-										className={`rounded px-1.5 py-0.5 text-tiny font-medium ${
-											skill.source === "workspace"
-												? "bg-blue-500/10 text-blue-400"
-												: "bg-purple-500/10 text-purple-400"
-										}`}
-									>
-										{skill.source}
-									</span>
-								</div>
-								{skill.description && (
-									<p className="mt-1 text-tiny text-ink-dull">{skill.description}</p>
-								)}
-								<p className="mt-1 font-mono text-tiny text-ink-faint/50">{skill.file_path}</p>
-							</div>
-						))}
-					</div>
-				)}
-			</div>
-		</>
 	);
 }

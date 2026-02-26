@@ -1,112 +1,77 @@
 import { useEffect, useRef, useState } from "react";
-import {
-	useCortexChat,
-	type ToolActivity,
-	type ArtifactPayload,
-	type ArtifactRef,
-	type WorkerInfo,
-} from "@/hooks/useCortexChat";
-import { api, type CortexChatAttachmentRef } from "@/api/client";
+import { useCortexChat, type ToolActivity } from "@/hooks/useCortexChat";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/ui";
-import { Add01Icon, PlusSignIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import { PlusSignIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 interface CortexChatPanelProps {
 	agentId: string;
 	channelId?: string;
 	onClose?: () => void;
-	onArtifactReceived?: (artifact: ArtifactPayload) => void;
 }
 
-function WorkerCard({ worker }: { worker: WorkerInfo }) {
+interface StarterPrompt {
+	label: string;
+	prompt: string;
+}
+
+const STARTER_PROMPTS: StarterPrompt[] = [
+	{
+		label: "Run health check",
+		prompt: "Give me an agent health report with active risks, stale work, and the top 3 fixes to do now.",
+	},
+	{
+		label: "Audit memories",
+		prompt: "Audit memory quality, find stale or contradictory memories, and propose exact cleanup actions.",
+	},
+	{
+		label: "Review workers",
+		prompt: "List recent worker runs, inspect failures, and summarize root cause plus next actions.",
+	},
+	{
+		label: "Draft task spec",
+		prompt: "Turn this goal into a task spec with subtasks, then move it to ready when it is execution-ready: ",
+	},
+];
+
+function EmptyCortexState({
+	channelId,
+	onStarterPrompt,
+	disabled,
+}: {
+	channelId?: string;
+	onStarterPrompt: (prompt: string) => void;
+	disabled: boolean;
+}) {
+	const contextHint = channelId
+		? "Current channel transcript is injected for this send only."
+		: "No channel transcript is injected. Operating at full agent scope.";
+
 	return (
-		<div className="flex items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2">
-			{worker.status === "running" ? (
-				<span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-			) : (
-				<span className="h-2 w-2 rounded-full bg-green-400" />
-			)}
-			<div className="min-w-0 flex-1">
-				<span className="text-tiny font-medium text-amber-400">
-					{worker.status === "running" ? "Worker running" : "Worker done"}
-				</span>
-				<p className="truncate text-tiny text-ink-faint">{worker.task}</p>
+		<div className="mx-auto w-full max-w-md">
+			<div className="rounded-2xl border border-app-line/40 bg-app-darkBox/15 p-5">
+				<h3 className="font-plex text-base font-medium text-ink">Cortex chat</h3>
+				<p className="mt-2 text-sm leading-relaxed text-ink-dull">
+					System-level control for this agent: memory, tasks, worker inspection, and direct tool execution.
+				</p>
+				<p className="mt-2 text-tiny text-ink-faint">{contextHint}</p>
+
+				<div className="mt-4 grid grid-cols-2 gap-2">
+					{STARTER_PROMPTS.map((item) => (
+						<button
+							key={item.label}
+							type="button"
+							onClick={() => onStarterPrompt(item.prompt)}
+							disabled={disabled}
+							className="rounded-lg border border-app-line/35 bg-app-box/20 px-2.5 py-2 text-left text-tiny text-ink-dull transition-colors hover:border-app-line/60 hover:text-ink disabled:opacity-40"
+						>
+							{item.label}
+						</button>
+					))}
+				</div>
 			</div>
 		</div>
-	);
-}
-
-function ArtifactCard({
-	artifactRef,
-	agentId,
-	onOpen,
-}: {
-	artifactRef: ArtifactRef;
-	agentId: string;
-	onOpen: (art: ArtifactPayload) => void;
-}) {
-	const [loading, setLoading] = useState(false);
-	const [loadError, setLoadError] = useState<string | null>(null);
-
-	const handleClick = async () => {
-		setLoading(true);
-		setLoadError(null);
-		try {
-			const info = await api.getArtifact(agentId, artifactRef.id);
-			onOpen({ id: info.id, kind: info.kind, title: info.title, content: info.content });
-		} catch {
-			setLoadError("Failed to load artifact");
-		} finally {
-			setLoading(false);
-		}
-	};
-
-	const kindLabel: Record<string, string> = {
-		book: "Book",
-		code: "Code",
-		text: "Document",
-		image: "Image",
-		sheet: "Spreadsheet",
-	};
-
-	return (
-		<>
-			<button
-				type="button"
-				onClick={handleClick}
-				disabled={loading}
-				className="group flex w-full items-center gap-2 rounded-md border border-violet-500/20 bg-violet-500/5 px-3 py-2 text-left transition-colors hover:bg-violet-500/10 disabled:opacity-60"
-			>
-				<div className="min-w-0 flex-1">
-					<span className="block truncate text-sm font-medium text-ink">{artifactRef.title}</span>
-					<span className="text-tiny text-ink-faint">
-						{kindLabel[artifactRef.kind] ?? artifactRef.kind} · click to open
-					</span>
-				</div>
-				{loading ? (
-					<span className="h-3.5 w-3.5 flex-shrink-0 animate-spin rounded-full border border-violet-400 border-t-transparent" />
-				) : (
-					<svg
-						xmlns="http://www.w3.org/2000/svg"
-						className="h-3.5 w-3.5 flex-shrink-0 text-violet-400/60 transition-colors group-hover:text-violet-400"
-						fill="none"
-						viewBox="0 0 24 24"
-						stroke="currentColor"
-						strokeWidth={2}
-					>
-						<path
-							strokeLinecap="round"
-							strokeLinejoin="round"
-							d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-						/>
-					</svg>
-				)}
-			</button>
-			{loadError && (
-				<p className="mt-1 text-tiny text-red-400">{loadError}</p>
-			)}
-		</>
 	);
 }
 
@@ -147,79 +112,104 @@ function ThinkingIndicator() {
 	);
 }
 
-export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceived }: CortexChatPanelProps) {
-	const { messages, isStreaming, error, toolActivity, activeWorkers, artifactRefs, sendMessage, spawnWorker, newThread } =
-		useCortexChat(agentId, channelId, onArtifactReceived);
+function CortexChatInput({
+	value,
+	onChange,
+	onSubmit,
+	isStreaming,
+}: {
+	value: string;
+	onChange: (value: string) => void;
+	onSubmit: () => void;
+	isStreaming: boolean;
+}) {
+	const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+	useEffect(() => {
+		textareaRef.current?.focus();
+	}, []);
+
+	useEffect(() => {
+		const textarea = textareaRef.current;
+		if (!textarea) return;
+
+		const adjustHeight = () => {
+			textarea.style.height = "auto";
+			const scrollHeight = textarea.scrollHeight;
+			const maxHeight = 160;
+			textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+			textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
+		};
+
+		adjustHeight();
+		textarea.addEventListener("input", adjustHeight);
+		return () => textarea.removeEventListener("input", adjustHeight);
+	}, [value]);
+
+	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+		if (event.key === "Enter" && !event.shiftKey) {
+			event.preventDefault();
+			onSubmit();
+		}
+	};
+
+	return (
+		<div className="rounded-xl border border-app-line/50 bg-app-box/40 backdrop-blur-xl transition-colors duration-200 hover:border-app-line/70">
+			<div className="flex items-end gap-2 p-2.5">
+				<textarea
+					ref={textareaRef}
+					value={value}
+					onChange={(event) => onChange(event.target.value)}
+					onKeyDown={handleKeyDown}
+					placeholder={isStreaming ? "Waiting for response..." : "Message the cortex..."}
+					disabled={isStreaming}
+					rows={1}
+					className="flex-1 resize-none bg-transparent px-1 py-1 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
+					style={{ maxHeight: "160px" }}
+				/>
+				<button
+					type="button"
+					onClick={onSubmit}
+					disabled={isStreaming || !value.trim()}
+					className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
+				>
+					<svg
+						width="14"
+						height="14"
+						viewBox="0 0 24 24"
+						fill="none"
+						stroke="currentColor"
+						strokeWidth="2"
+						strokeLinecap="round"
+						strokeLinejoin="round"
+					>
+						<path d="M12 19V5M5 12l7-7 7 7" />
+					</svg>
+				</button>
+			</div>
+		</div>
+	);
+}
+
+export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanelProps) {
+	const { messages, threadId, isStreaming, error, toolActivity, sendMessage, newThread } = useCortexChat(agentId, channelId);
 	const [input, setInput] = useState("");
-	const [pendingAttachments, setPendingAttachments] = useState<CortexChatAttachmentRef[]>([]);
-	const [isUploading, setIsUploading] = useState(false);
-	const [uploadError, setUploadError] = useState<string | null>(null);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
-	const inputRef = useRef<HTMLInputElement>(null);
-	const fileInputRef = useRef<HTMLInputElement>(null);
 
 	useEffect(() => {
 		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-	}, [messages.length, isStreaming, toolActivity.length, activeWorkers.length]);
+	}, [messages.length, isStreaming, toolActivity.length]);
 
-	const handleSubmit = (event?: React.FormEvent) => {
-		event?.preventDefault();
+	const handleSubmit = () => {
 		const trimmed = input.trim();
-		if ((!trimmed && pendingAttachments.length === 0) || isUploading) return;
-
-		// /clear or /new — reset to a fresh thread
-		if (trimmed === "/clear" || trimmed === "/new") {
-			setInput("");
-			setPendingAttachments([]);
-			setUploadError(null);
-			newThread();
-			return;
-		}
-
-		// /worker <task> — spawn a background worker without blocking the chat
-		if (trimmed.startsWith("/worker ")) {
-			const task = trimmed.slice("/worker ".length).trim();
-			if (task) {
-				setInput("");
-				spawnWorker(task);
-			}
-			return;
-		}
-
-		if (isStreaming) return;
+		if (!trimmed || isStreaming) return;
 		setInput("");
-		setUploadError(null);
-		sendMessage(trimmed, pendingAttachments);
-		setPendingAttachments([]);
+		sendMessage(trimmed);
 	};
 
-	const handlePickFiles = () => {
-		if (isStreaming || isUploading) return;
-		fileInputRef.current?.click();
-	};
-
-	const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-		const files = Array.from(event.target.files ?? []);
-		event.target.value = "";
-		if (files.length === 0) return;
-
-		setUploadError(null);
-		setIsUploading(true);
-		try {
-			const response = await api.cortexChatUpload(agentId, files);
-			setPendingAttachments((previous) => [...previous, ...response.attachments]);
-		} catch (uploadError) {
-			const message = uploadError instanceof Error ? uploadError.message : "Upload failed";
-			setUploadError(message);
-		} finally {
-			setIsUploading(false);
-		}
-	};
-
-	const removeAttachment = (indexToRemove: number) => {
-		setPendingAttachments((previous) =>
-			previous.filter((_, index) => index !== indexToRemove),
-		);
+	const handleStarterPrompt = (prompt: string) => {
+		if (isStreaming || !threadId) return;
+		sendMessage(prompt);
 	};
 
 	return (
@@ -239,6 +229,7 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 						onClick={newThread}
 						variant="ghost"
 						size="icon"
+						disabled={isStreaming}
 						className="h-7 w-7"
 						title="New thread"
 					>
@@ -260,87 +251,26 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 
 			{/* Messages */}
 			<div className="flex-1 overflow-y-auto">
-				<div className="flex flex-col gap-3 p-4">
-					{messages.length === 0 && !isStreaming && activeWorkers.length === 0 && (
-						<p className="py-8 text-center text-sm text-ink-faint">
-							Ask the cortex anything · use <span className="font-mono">/worker</span> to spawn background workers
-						</p>
-					)}
-					{messages.map((message) => {
-						// Worker result injections are shown as a special card, not a plain user bubble
-						if (
-							message.role === "user" &&
-							message.content.startsWith("[Worker Result:")
-						) {
-							const firstLine = message.content.split("\n")[0] ?? "";
-							const taskMatch = firstLine.match(/^\[Worker Result: (.+)\]$/);
-							const task = taskMatch ? taskMatch[1] : "Worker";
-							const result = message.content.slice(firstLine.length).trim();
-							return (
-								<div
-									key={message.id}
-									className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2"
-								>
-									<span className="text-tiny font-medium text-amber-400">
-										Worker completed: {task}
-									</span>
-									<p className="mt-0.5 line-clamp-3 text-tiny text-ink-faint">
-										{result}
-									</p>
+				<div className="flex flex-col gap-5 p-3 pb-4">
+					{messages.map((message) => (
+						<div key={message.id}>
+							{message.role === "user" ? (
+								<div className="flex justify-end">
+									<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-3 py-2">
+										<p className="text-sm text-ink">{message.content}</p>
+									</div>
 								</div>
-							);
-						}
-
-						return (
-							<div
-								key={message.id}
-								className={`rounded-md px-3 py-2 ${
-									message.role === "user"
-										? "ml-8 bg-accent/10"
-										: "mr-2 bg-app-darkBox/50"
-								}`}
-							>
-								<span
-									className={`text-tiny font-medium ${
-										message.role === "user" ? "text-accent-faint" : "text-violet-400"
-									}`}
-								>
-									{message.role === "user" ? "you" : "cortex"}
-								</span>
-								<div className="mt-0.5 text-sm text-ink-dull">
-									{message.role === "assistant" ? (
-										<Markdown>{message.content}</Markdown>
-									) : (
-										<p>{message.content}</p>
-									)}
+							) : (
+								<div className="text-sm text-ink-dull">
+									<Markdown>{message.content}</Markdown>
 								</div>
-							</div>
-						);
-					})}
-					{artifactRefs.length > 0 && onArtifactReceived && (
-						<div className="flex flex-col gap-1.5 pt-1">
-							{artifactRefs.map((ref) => (
-								<ArtifactCard
-									key={ref.id}
-									artifactRef={ref}
-									agentId={agentId}
-									onOpen={onArtifactReceived}
-								/>
-							))}
+							)}
 						</div>
-					)}
-					{activeWorkers.length > 0 && (
-						<div className="flex flex-col gap-1.5">
-							{activeWorkers.map((worker) => (
-								<WorkerCard key={worker.id} worker={worker} />
-							))}
-						</div>
-					)}
+					))}
 
 					{/* Streaming state */}
 					{isStreaming && (
-						<div className="mr-2 rounded-md bg-app-darkBox/50 px-3 py-2">
-							<span className="text-tiny font-medium text-violet-400">cortex</span>
+						<div>
 							<ToolActivityIndicator activity={toolActivity} />
 							{toolActivity.length === 0 && <ThinkingIndicator />}
 						</div>
@@ -355,80 +285,25 @@ export function CortexChatPanel({ agentId, channelId, onClose, onArtifactReceive
 				</div>
 			</div>
 
-			{/* Input */}
-			<form onSubmit={handleSubmit} className="border-t border-app-line/50 p-3">
-				<input
-					ref={fileInputRef}
-					type="file"
-					multiple
-					accept="image/png,image/jpeg,image/gif,image/webp"
-					className="hidden"
-					onChange={handleFileChange}
-				/>
-				{pendingAttachments.length > 0 && (
-					<div className="mb-2 flex flex-wrap gap-1.5">
-						{pendingAttachments.map((attachment, index) => (
-							<div
-								key={`${attachment.path}-${index}`}
-								className="flex items-center gap-1 rounded border border-app-line bg-app-darkBox px-2 py-1 text-tiny text-ink-faint"
-							>
-								<span className="max-w-56 truncate">{attachment.filename}</span>
-								<button
-									type="button"
-									onClick={() => removeAttachment(index)}
-									className="text-ink-faint transition-colors hover:text-ink"
-									aria-label={`Remove ${attachment.filename}`}
-								>
-									<HugeiconsIcon icon={Cancel01Icon} className="h-3 w-3" />
-								</button>
-							</div>
-						))}
-					</div>
-				)}
-				<div className="flex gap-2">
-					<Button
-						type="button"
-						onClick={handlePickFiles}
-						disabled={isStreaming || isUploading}
-						size="sm"
-						variant="ghost"
-						className="px-2"
-						title="Upload reference images"
-					>
-						<HugeiconsIcon icon={Add01Icon} className="h-3.5 w-3.5" />
-					</Button>
-					<input
-						ref={inputRef}
-						type="text"
-						value={input}
-						onChange={(event) => setInput(event.target.value)}
-						placeholder={
-							isStreaming
-								? "Waiting for response..."
-								: isUploading
-									? "Uploading images..."
-									: "Message the cortex… or /worker <task>"
-						}
-						disabled={isUploading || isStreaming}
-						className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-violet-500/50 focus:outline-none focus:ring-0 disabled:opacity-60"
+			{messages.length === 0 && !isStreaming && (
+				<div className="px-3 pb-2">
+					<EmptyCortexState
+						channelId={channelId}
+						onStarterPrompt={handleStarterPrompt}
+						disabled={isStreaming || !threadId}
 					/>
-					<Button
-						type="submit"
-						disabled={
-							isUploading
-								|| (isStreaming && !input.trim().startsWith("/worker "))
-								|| (!input.trim() && pendingAttachments.length === 0)
-						}
-						size="sm"
-						className="bg-violet-500/20 text-violet-400 hover:bg-violet-500/30"
-					>
-						Send
-					</Button>
 				</div>
-				{uploadError && (
-					<p className="mt-2 text-tiny text-red-400">{uploadError}</p>
-				)}
-			</form>
+			)}
+
+			{/* Input */}
+			<div className="border-t border-app-line/50 p-3">
+				<CortexChatInput
+					value={input}
+					onChange={setInput}
+					onSubmit={handleSubmit}
+					isStreaming={isStreaming}
+				/>
+			</div>
 		</div>
 	);
 }

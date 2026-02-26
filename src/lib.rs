@@ -24,6 +24,7 @@ pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod skills;
+pub mod tasks;
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 pub mod tools;
@@ -118,6 +119,7 @@ pub enum ProcessEvent {
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         task: String,
+        worker_type: String,
     },
     WorkerStatus {
         agent_id: AgentId,
@@ -131,12 +133,14 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         result: String,
         notify: bool,
+        success: bool,
     },
     ToolStarted {
         agent_id: AgentId,
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         tool_name: String,
+        args: String,
     },
     ToolCompleted {
         agent_id: AgentId,
@@ -187,6 +191,13 @@ pub enum ProcessEvent {
         link_id: String,
         channel_id: ChannelId,
     },
+    TaskUpdated {
+        agent_id: AgentId,
+        task_number: i64,
+        status: String,
+        /// "created", "updated", or "deleted".
+        action: String,
+    },
 }
 
 /// Shared dependency bundle for agent processes.
@@ -196,6 +207,7 @@ pub struct AgentDeps {
     pub memory_search: Arc<memory::MemorySearch>,
     pub llm_manager: Arc<llm::LlmManager>,
     pub mcp_manager: Arc<mcp::McpManager>,
+    pub task_store: Arc<tasks::TaskStore>,
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,

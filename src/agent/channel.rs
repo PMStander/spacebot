@@ -33,6 +33,24 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
 
+/// A background process result waiting to be relayed to the user via retrigger.
+///
+/// Instead of injecting raw result text into history as a fake "User" message
+/// (where it can be confused with prior results), pending results are accumulated
+/// here and embedded directly into the retrigger message text. This gives the
+/// LLM unambiguous, ID-tagged results to relay.
+#[derive(Clone, Debug)]
+struct PendingResult {
+    /// "branch" or "worker"
+    process_type: &'static str,
+    /// The branch or worker ID (short UUID).
+    process_id: String,
+    /// The result/conclusion text from the process.
+    result: String,
+    /// Whether the process completed successfully.
+    success: bool,
+}
+
 /// Shared state that channel tools need to act on the channel.
 ///
 /// Wrapped in Arc and passed to tools (branch, spawn_worker, route, cancel)
@@ -74,9 +92,13 @@ impl ChannelState {
 
         if let Some(handle) = handle {
             handle.abort();
+            // Mark the DB row as cancelled since the abort prevents WorkerComplete from firing
+            self.process_run_logger
+                .log_worker_completed(worker_id, "Worker cancelled", false);
             Ok(())
         } else if removed {
-            // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
+            self.process_run_logger
+                .log_worker_completed(worker_id, "Worker cancelled", false);
             Ok(())
         } else {
             Err(format!("Worker {worker_id} not found"))
@@ -145,19 +167,11 @@ pub struct Channel {
     pending_retrigger_metadata: HashMap<String, serde_json::Value>,
     /// Deadline for firing the pending retrigger (debounce timer).
     retrigger_deadline: Option<tokio::time::Instant>,
+    /// Background process results waiting to be embedded in the next retrigger.
+    /// Accumulated during the debounce window and drained when the retrigger fires.
+    pending_results: Vec<PendingResult>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
-    /// Turn counter for link channels (used for safety cap).
-    link_turn_count: u32,
-    /// Originating channel that triggered this link conversation (for routing conclusions back).
-    originating_channel: Option<String>,
-    /// Messaging adapter name from the originating channel (e.g. "webchat", "discord").
-    /// Used by `route_link_conclusion` to set the correct `source` on injected messages.
-    originating_source: Option<String>,
-    /// Set after `conclude_link` fires. Prevents the channel from processing
-    /// further messages, stopping the ping-pong that happens when both sides
-    /// keep responding to each other after the task is done.
-    link_concluded: bool,
 }
 
 impl Channel {
@@ -213,45 +227,20 @@ impl Channel {
 
         // Each channel gets its own isolated tool server to avoid races between
         // concurrent channels sharing per-turn add/remove cycles.
-        // Canvas tools are added at creation time (persistent, not per-turn).
-        let tool_server = {
-            let mut server = ToolServer::new();
-            if let Some(ref api_tx) = deps.api_event_tx {
-                server = server
-                    .tool(crate::tools::CanvasSetTool::new(
-                        deps.sqlite_pool.clone(),
-                        deps.agent_id.to_string(),
-                        api_tx.clone(),
-                    ))
-                    .tool(crate::tools::CanvasRemoveTool::new(
-                        deps.sqlite_pool.clone(),
-                        deps.agent_id.to_string(),
-                        api_tx.clone(),
-                    ))
-                    .tool(crate::tools::CanvasListTool::new(deps.sqlite_pool.clone()));
-            }
-            server.run()
-        };
+        let tool_server = ToolServer::new().run();
 
-        // Construct the send_agent_message tool if this agent has links and a messaging manager.
+        // Construct the send_agent_message tool if this agent has links.
         let send_agent_message_tool = {
             let has_links =
                 !crate::links::links_for_agent(&deps.links.load(), &deps.agent_id).is_empty();
-            match (&deps.messaging_manager, has_links) {
-                (Some(mm), true) => Some(crate::tools::SendAgentMessageTool::new(
+            if has_links {
+                Some(crate::tools::SendAgentMessageTool::new(
                     deps.agent_id.clone(),
-                    deps.agent_names
-                        .get(deps.agent_id.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| deps.agent_id.to_string()),
-                    id.clone(),
                     deps.links.clone(),
-                    mm.clone(),
-                    channel_store.clone(),
-                    deps.event_tx.clone(),
                     deps.agent_names.clone(),
-                )),
-                _ => None,
+                ))
+            } else {
+                None
             }
         };
 
@@ -279,11 +268,8 @@ impl Channel {
             pending_retrigger: false,
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
+            pending_results: Vec::new(),
             send_agent_message_tool,
-            link_turn_count: 0,
-            originating_channel: None,
-            originating_source: None,
-            link_concluded: false,
         };
 
         (channel, message_tx)
@@ -387,12 +373,6 @@ impl Channel {
             return false;
         }
         if message.source == "system" {
-            return false;
-        }
-        // Internal link channels are stateful handshakes between two agents.
-        // Coalescing can merge conclusion + follow-up messages into one turn and
-        // bypass per-message guards, so process link messages immediately.
-        if message.conversation_id.starts_with("link:") {
             return false;
         }
         if config.multi_user_only && self.is_dm() {
@@ -614,19 +594,20 @@ impl Channel {
                 user_contents.push(UserContent::text(formatted_text));
             }
         }
+        // Separate text and non-text (image/audio) content
+        let mut text_parts = Vec::new();
+        let mut attachment_parts = Vec::new();
+        for content in user_contents {
+            match content {
+                UserContent::Text(t) => text_parts.push(t.text.clone()),
+                other => attachment_parts.push(other),
+            }
+        }
 
-        // Combine all user content into a single text
         let combined_text = format!(
             "[{} messages arrived rapidly in this channel]\n\n{}",
             message_count,
-            user_contents
-                .iter()
-                .filter_map(|c| match c {
-                    UserContent::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            text_parts.join("\n")
         );
 
         // Build system prompt with coalesce hint
@@ -640,20 +621,18 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let source = messages.first().map(|m| m.source.clone());
-        let (result, skip_flag, replied_flag, _conclude_flag, _conclude_summary) = self
+        let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
                 &conversation_id,
-                Vec::new(), // Attachments already formatted into text
-                source,
+                attachment_parts,
+                false, // not a retrigger
             )
             .await?;
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, false)
             .await;
-
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
@@ -684,25 +663,11 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let cli_config = rc.cli_workers.load();
-        let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
-        let cli_backends: Vec<(String, String)> = cli_config
-            .backends
-            .iter()
-            .map(
-                |(name, cfg): (&String, &crate::cli_worker::CliBackendConfig)| {
-                    (name.clone(), cfg.description.clone())
-                },
-            )
-            .collect();
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(
-                browser_enabled,
-                web_search_enabled,
-                opencode_enabled,
-                cli_workers_enabled,
-                &cli_backends,
-            )?;
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -718,7 +683,6 @@ impl Channel {
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
-        let link_context = self.build_link_context(&prompt_engine);
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -732,7 +696,6 @@ impl Channel {
             coalesce_hint,
             available_channels,
             org_context,
-            link_context,
         )
     }
 
@@ -771,35 +734,8 @@ impl Channel {
             Vec::new()
         };
 
-        // Emit AgentMessageReceived event for internal agent-to-agent messages
-        if message.source == "internal"
-            && let Some(from_agent_id) = message
-                .metadata
-                .get("from_agent_id")
-                .and_then(|v| v.as_str())
-        {
-            self.deps
-                .event_tx
-                .send(ProcessEvent::AgentMessageReceived {
-                    from_agent_id: Arc::from(from_agent_id),
-                    to_agent_id: self.deps.agent_id.clone(),
-                    link_id: message.conversation_id.clone(),
-                    channel_id: self.id.clone(),
-                })
-                .ok();
-        }
-
         // Persist user messages (skip system re-triggers)
-        let is_link_conclusion = message.metadata.contains_key("link_conclusion");
-        if is_link_conclusion {
-            // Link conclusion messages are internal control messages used to
-            // retrigger the originating channel. Do not persist them to the
-            // visible conversation timeline.
-            tracing::debug!(
-                channel_id = %self.id,
-                "received link conclusion control message"
-            );
-        } else if message.source != "system" {
+        if message.source != "system" {
             let sender_name = message
                 .metadata
                 .get("sender_display_name")
@@ -847,102 +783,6 @@ impl Channel {
             )?);
         }
 
-        // On link channels, seed conversation history with the original outgoing message
-        // so the agent has context for what it previously said when the reply arrives.
-        if message.source == "internal" {
-            // Capture the originating channel and adapter source for routing conclusions back
-            if self.originating_channel.is_none() {
-                self.originating_channel = message
-                    .metadata
-                    .get("originating_channel")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                self.originating_source = message
-                    .metadata
-                    .get("originating_source")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-            }
-
-            if let Some(original) = message
-                .metadata
-                .get("original_sent_message")
-                .and_then(|v| v.as_str())
-            {
-                let history = self.state.history.read().await;
-                let is_first_message = history.is_empty();
-                drop(history);
-
-                if is_first_message {
-                    let mut history = self.state.history.write().await;
-                    history.push(rig::message::Message::Assistant {
-                        id: None,
-                        content: rig::OneOrMany::one(rig::message::AssistantContent::text(
-                            original,
-                        )),
-                    });
-                    drop(history);
-
-                    // Persist so the message appears in the dashboard timeline
-                    self.state.conversation_logger.log_bot_message_with_name(
-                        &self.state.channel_id,
-                        original,
-                        Some(self.agent_display_name()),
-                    );
-                }
-            }
-        }
-
-        // Drop messages on concluded link channels
-        let is_link_channel = message.conversation_id.starts_with("link:");
-        if is_link_channel && self.link_concluded {
-            // Late-arriving link conclusions should still cascade up the chain.
-            // This handles races where a parent link concludes before a child
-            // link finishes and reports back.
-            if is_link_conclusion {
-                let summary = message
-                    .metadata
-                    .get("link_conclusion_summary")
-                    .and_then(|value| value.as_str())
-                    .or_else(|| {
-                        raw_text.split_once('\n').and_then(|(header, body)| {
-                            if header.starts_with("[Link conversation with ")
-                                && header.ends_with(" concluded]")
-                            {
-                                Some(body)
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .unwrap_or(raw_text.as_str());
-
-                self.route_link_conclusion(summary, &message).await;
-            }
-
-            tracing::debug!(
-                channel_id = %self.id,
-                "dropping message on concluded link channel"
-            );
-            return Ok(());
-        }
-
-        // Track link channel turns for safety cap
-        if is_link_channel && message.source != "system" {
-            self.link_turn_count += 1;
-        }
-
-        // Safety cap: force-conclude link conversations at 20 turns
-        const LINK_MAX_TURNS: u32 = 20;
-        if is_link_channel && self.link_turn_count > LINK_MAX_TURNS {
-            tracing::warn!(
-                channel_id = %self.id,
-                turns = self.link_turn_count,
-                "link conversation hit safety cap, dropping message"
-            );
-            return Ok(());
-        }
-
         let system_prompt = self.build_system_prompt().await?;
 
         {
@@ -952,31 +792,39 @@ impl Channel {
 
         let is_retrigger = message.source == "system";
 
-        let message_source = if is_retrigger {
-            None
-        } else {
-            Some(message.source.clone())
-        };
-
-        let (result, skip_flag, replied_flag, conclude_flag, conclude_summary) = self
+        let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
                 &message.conversation_id,
                 attachment_content,
-                message_source,
+                is_retrigger,
             )
             .await?;
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
 
-        // Handle link conversation conclusion
-        let concluded = conclude_flag.load(std::sync::atomic::Ordering::Relaxed);
-        if concluded {
-            let summary = conclude_summary.read().await.clone().unwrap_or_default();
-            self.route_link_conclusion(&summary, &message).await;
-            self.link_concluded = true;
+        // After a successful retrigger relay, inject a compact record into
+        // history so the conversation has context about what was relayed.
+        // The retrigger turn itself is rolled back by apply_history_after_turn
+        // (PromptCancelled leaves dangling tool calls), so without this the
+        // LLM would have no memory of the background result on subsequent turns.
+        if is_retrigger && replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            // Extract the result summaries from the metadata we attached in
+            // flush_pending_retrigger, so we record only the substance (not
+            // the retrigger instructions/template scaffolding).
+            let summary = message
+                .metadata
+                .get("retrigger_result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("[background work completed and result relayed to user]");
+
+            let mut history = self.state.history.write().await;
+            history.push(rig::message::Message::Assistant {
+                id: None,
+                content: OneOrMany::one(rig::message::AssistantContent::text(summary)),
+            });
         }
 
         // Check context size and trigger compaction if needed
@@ -1091,149 +939,6 @@ impl Channel {
         prompt_engine.render_org_context(org_context).ok()
     }
 
-    /// Build link context for the current channel if it's an internal agent-to-agent channel.
-    fn build_link_context(&self, prompt_engine: &crate::prompts::PromptEngine) -> Option<String> {
-        // Link channels have conversation IDs starting with "link:"
-        let conversation_id = self.conversation_id.as_deref()?;
-        if !conversation_id.starts_with("link:") {
-            return None;
-        }
-
-        let agent_id = self.deps.agent_id.as_ref();
-        let all_links = self.deps.links.load();
-
-        // Find the link that matches this agent's side of the link channel
-        let link = all_links
-            .iter()
-            .find(|link| link.channel_id_for(agent_id) == conversation_id)?;
-
-        let is_from = link.from_agent_id == agent_id;
-        let other_agent_id = if is_from {
-            &link.to_agent_id
-        } else {
-            &link.from_agent_id
-        };
-
-        let role = match link.kind {
-            crate::links::LinkKind::Hierarchical if is_from => "manages",
-            crate::links::LinkKind::Hierarchical => "reports to",
-            crate::links::LinkKind::Peer => "peer",
-        };
-
-        let link_context = crate::prompts::engine::LinkContext {
-            agent_name: self
-                .deps
-                .agent_names
-                .get(other_agent_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| other_agent_id.clone()),
-            relationship: role.to_string(),
-        };
-
-        prompt_engine.render_link_context(link_context).ok()
-    }
-
-    /// Route a link conversation conclusion back to the originating channel.
-    ///
-    /// Injects a system message into the channel that originally called
-    /// `send_agent_message`, then stops processing further messages on this
-    /// link channel.
-    async fn route_link_conclusion(&self, summary: &str, last_message: &crate::InboundMessage) {
-        // Derive the peer agent name from the link channel conversation_id
-        let peer_agent = self
-            .conversation_id
-            .as_deref()
-            .and_then(|cid| cid.strip_prefix("link:"))
-            .and_then(|rest| {
-                // Format is "link:{self}:{peer}", skip past self
-                let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                parts.get(1).copied()
-            })
-            .map(|id| {
-                self.deps
-                    .agent_names
-                    .get(id)
-                    .cloned()
-                    .unwrap_or_else(|| id.to_string())
-            })
-            .unwrap_or_else(|| "agent".to_string());
-
-        // Route conclusion to the originating channel (the one that called send_agent_message)
-        if let Some(originating) = &self.originating_channel {
-            if let Some(mm) = &self.deps.messaging_manager {
-                let conclusion_text = format!(
-                    "[Link conversation with {} concluded]\n{}",
-                    peer_agent, summary
-                );
-
-                // Link-to-link conclusions are internal control messages and must
-                // stay on the internal routing path. For non-link destinations,
-                // use the captured adapter source.
-                let source = if originating.starts_with("link:") {
-                    "internal".to_string()
-                } else {
-                    self.originating_source.clone().unwrap_or_else(|| {
-                        originating
-                            .split(':')
-                            .next()
-                            .unwrap_or("webchat")
-                            .to_string()
-                    })
-                };
-
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("link_conclusion".into(), serde_json::json!(true));
-                metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
-                metadata.insert("link_conclusion_peer".into(), serde_json::json!(peer_agent));
-
-                let conclusion_message = crate::InboundMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source,
-                    conversation_id: originating.clone(),
-                    sender_id: peer_agent.clone(),
-                    agent_id: Some(self.deps.agent_id.clone()),
-                    content: crate::MessageContent::Text(conclusion_text),
-                    timestamp: chrono::Utc::now(),
-                    metadata,
-                    formatted_author: Some(format!("[{}]", peer_agent)),
-                };
-
-                if let Err(error) = mm.inject_message(conclusion_message).await {
-                    tracing::error!(
-                        %error,
-                        originating_channel = %originating,
-                        "failed to route link conclusion to originating channel"
-                    );
-                } else {
-                    tracing::info!(
-                        originating_channel = %originating,
-                        peer = %peer_agent,
-                        "routed link conclusion to originating channel"
-                    );
-                }
-            }
-        } else {
-            tracing::debug!(
-                channel_id = %self.id,
-                "link conversation concluded but no originating channel to notify"
-            );
-        }
-
-        // Also try to propagate originating_channel via the reply metadata so
-        // the peer's side can also conclude back to the same originating channel
-        if let Some(from_agent) = last_message
-            .metadata
-            .get("from_agent_id")
-            .and_then(|v| v.as_str())
-        {
-            tracing::info!(
-                from = %from_agent,
-                channel_id = %self.id,
-                "link conversation concluded"
-            );
-        }
-    }
-
     /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> crate::error::Result<String> {
         let rc = &self.deps.runtime_config;
@@ -1247,25 +952,11 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let cli_config = rc.cli_workers.load();
-        let cli_workers_enabled = cli_config.enabled && !cli_config.backends.is_empty();
-        let cli_backends: Vec<(String, String)> = cli_config
-            .backends
-            .iter()
-            .map(
-                |(name, cfg): (&String, &crate::cli_worker::CliBackendConfig)| {
-                    (name.clone(), cfg.description.clone())
-                },
-            )
-            .collect();
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(
-                browser_enabled,
-                web_search_enabled,
-                opencode_enabled,
-                cli_workers_enabled,
-                &cli_backends,
-            )?;
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -1275,7 +966,6 @@ impl Channel {
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
-        let link_context = self.build_link_context(&prompt_engine);
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -1289,7 +979,6 @@ impl Channel {
             None, // coalesce_hint - only set for batched messages
             available_channels,
             org_context,
-            link_context,
         )
     }
 
@@ -1297,32 +986,21 @@ impl Channel {
     ///
     /// Returns the prompt result and skip flag for the caller to dispatch.
     #[allow(clippy::type_complexity)]
-    #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content, message_source), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
+    #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
     async fn run_agent_turn(
         &self,
         user_text: &str,
         system_prompt: &str,
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
-        message_source: Option<String>,
+        is_retrigger: bool,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
         crate::tools::RepliedFlag,
-        crate::tools::ConcludeLinkFlag,
-        crate::tools::ConcludeLinkSummary,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
-
-        // Only provide conclude_link on link channels
-        let is_link_channel = conversation_id.starts_with("link:");
-        let (conclude_flag, conclude_summary) = crate::tools::new_conclude_link();
-        let conclude_link_args = if is_link_channel {
-            Some((conclude_flag.clone(), conclude_summary.clone()))
-        } else {
-            None
-        };
 
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
@@ -1333,10 +1011,6 @@ impl Channel {
             replied_flag.clone(),
             self.deps.cron_tool.clone(),
             self.send_agent_message_tool.clone(),
-            conclude_link_args,
-            message_source,
-            self.originating_channel.clone(),
-            self.originating_source.clone(),
         )
         .await
         {
@@ -1389,11 +1063,24 @@ impl Channel {
             .await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
-        // to use the tool calling API. Inject a correction and give it one more try.
-        if let Ok(ref response) = result
-            && extract_reply_from_tool_syntax(response.trim()).is_some()
-        {
-            tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
+        // to use the tool calling API. Inject a correction and retry a couple
+        // times so the model can recover by calling `reply` or `skip`.
+        const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
+        let mut recovery_attempts = 0;
+        while let Ok(ref response) = result {
+            if !crate::tools::should_block_user_visible_text(response)
+                || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
+            {
+                break;
+            }
+
+            recovery_attempts += 1;
+            tracing::warn!(
+                channel_id = %self.id,
+                attempt = recovery_attempts,
+                "LLM emitted blocked structured output, retrying with correction"
+            );
+
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
             result = agent
@@ -1405,20 +1092,21 @@ impl Channel {
 
         {
             let mut guard = self.state.history.write().await;
-            apply_history_after_turn(&result, &mut guard, history, history_len_before, &self.id);
+            apply_history_after_turn(
+                &result,
+                &mut guard,
+                history,
+                history_len_before,
+                &self.id,
+                is_retrigger,
+            );
         }
 
         if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
-        Ok((
-            result,
-            skip_flag,
-            replied_flag,
-            conclude_flag,
-            conclude_summary,
-        ))
+        Ok((result, skip_flag, replied_flag))
     }
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
@@ -1438,6 +1126,7 @@ impl Channel {
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
+                let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
 
                 if skipped && is_retrigger {
                     // The LLM skipped on a retrigger turn. This means a worker
@@ -1446,11 +1135,111 @@ impl Channel {
                     // fallback since the user hasn't seen the result yet.
                     let text = response.trim();
                     if !text.is_empty() {
-                        tracing::info!(
+                        if crate::tools::should_block_user_visible_text(text) {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                "blocked retrigger fallback output containing structured or tool syntax"
+                            );
+                        } else {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                response_len = text.len(),
+                                "LLM skipped on retrigger but produced text, sending as fallback"
+                            );
+                            let extracted = extract_reply_from_tool_syntax(text);
+                            let source = self
+                                .conversation_id
+                                .as_deref()
+                                .and_then(|conversation_id| conversation_id.split(':').next())
+                                .unwrap_or("unknown");
+                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                                extracted.as_deref().unwrap_or(text),
+                                source,
+                            );
+                            if !final_text.is_empty() {
+                                if extracted.is_some() {
+                                    tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
+                                }
+                                self.state
+                                    .conversation_logger
+                                    .log_bot_message(&self.state.channel_id, &final_text);
+                                if let Err(error) = self
+                                    .response_tx
+                                    .send(OutboundResponse::Text(final_text))
+                                    .await
+                                {
+                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
                             channel_id = %self.id,
-                            response_len = text.len(),
-                            "LLM skipped on retrigger but produced text, sending as fallback"
+                            "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
                         );
+                    }
+                } else if skipped {
+                    tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
+                } else if replied {
+                    tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
+                } else if is_retrigger {
+                    // On retrigger turns the LLM should use the reply tool, but
+                    // some models return the result as raw text instead. Send it
+                    // as a fallback so the user still gets the worker/branch output.
+                    let text = response.trim();
+                    if !text.is_empty() {
+                        if crate::tools::should_block_user_visible_text(text) {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                "blocked retrigger output containing structured or tool syntax"
+                            );
+                        } else {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                response_len = text.len(),
+                                "retrigger produced text without reply tool, sending as fallback"
+                            );
+                            let extracted = extract_reply_from_tool_syntax(text);
+                            let source = self
+                                .conversation_id
+                                .as_deref()
+                                .and_then(|conversation_id| conversation_id.split(':').next())
+                                .unwrap_or("unknown");
+                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                                extracted.as_deref().unwrap_or(text),
+                                source,
+                            );
+                            if !final_text.is_empty() {
+                                self.state
+                                    .conversation_logger
+                                    .log_bot_message(&self.state.channel_id, &final_text);
+                                if let Err(error) = self
+                                    .response_tx
+                                    .send(OutboundResponse::Text(final_text))
+                                    .await
+                                {
+                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                }
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            channel_id = %self.id,
+                            "retrigger turn produced no text and no reply tool call"
+                        );
+                    }
+                } else {
+                    // If the LLM returned text without using the reply tool, send it
+                    // directly. Some models respond with text instead of tool calls.
+                    // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
+                    // attempt to extract the reply content and send that instead.
+                    let text = response.trim();
+                    if crate::tools::should_block_user_visible_text(text) {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            "blocked fallback output containing structured or tool syntax"
+                        );
+                    } else {
                         let extracted = extract_reply_from_tool_syntax(text);
                         let source = self
                             .conversation_id
@@ -1463,89 +1252,20 @@ impl Channel {
                         );
                         if !final_text.is_empty() {
                             if extracted.is_some() {
-                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
+                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                             }
-                            self.state
-                                .conversation_logger
-                                .log_bot_message(&self.state.channel_id, &final_text);
+                            self.state.conversation_logger.log_bot_message_with_name(
+                                &self.state.channel_id,
+                                &final_text,
+                                Some(self.agent_display_name()),
+                            );
                             if let Err(error) = self
                                 .response_tx
                                 .send(OutboundResponse::Text(final_text))
                                 .await
                             {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                             }
-                        }
-                    } else {
-                        tracing::warn!(
-                            channel_id = %self.id,
-                            "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
-                        );
-                    }
-                } else if skipped {
-                    tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
-                } else if replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
-                } else if is_retrigger {
-                    // On retrigger turns, suppress fallback text. The LLM should
-                    // use the reply tool explicitly if it has something to say, or
-                    // the skip tool if not. Raw text output from retriggers is
-                    // almost always internal acknowledgment, not a real response.
-                    tracing::debug!(
-                        channel_id = %self.id,
-                        response_len = response.len(),
-                        "retrigger turn fallback suppressed (LLM did not use reply/skip tool)"
-                    );
-                } else {
-                    // If the LLM returned text without using the reply tool, send it
-                    // directly. Some models respond with text instead of tool calls.
-                    // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
-                    // attempt to extract the reply content and send that instead.
-                    let text = response.trim();
-                    let extracted = extract_reply_from_tool_syntax(text);
-                    let mut final_text = extracted.as_deref().unwrap_or(text).to_string();
-
-                    let artifacts = parse_artifact_tags(&final_text);
-                    if !artifacts.is_empty() {
-                        for artifact in &artifacts {
-                            if let Err(error) =
-                                persist_channel_artifact(&self.deps.sqlite_pool, &self.id, artifact)
-                                    .await
-                            {
-                                tracing::warn!(
-                                    %error,
-                                    channel_id = %self.id,
-                                    artifact_id = %artifact.id,
-                                    "failed to persist channel artifact",
-                                );
-                            } else {
-                                emit_artifact_created_event(
-                                    &self.deps.api_event_tx,
-                                    &self.deps.agent_id,
-                                    &self.id,
-                                    artifact,
-                                );
-                            }
-                        }
-                        final_text = strip_artifact_tags(&final_text);
-                    }
-
-                    let final_text = final_text.trim();
-                    if !final_text.is_empty() {
-                        if extracted.is_some() {
-                            tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
-                        }
-                        self.state.conversation_logger.log_bot_message_with_name(
-                            &self.state.channel_id,
-                            &final_text,
-                            Some(self.agent_display_name()),
-                        );
-                        if let Err(error) = self
-                            .response_tx
-                            .send(OutboundResponse::Text(final_text.to_string()))
-                            .await
-                        {
-                            tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                         }
                     }
 
@@ -1564,15 +1284,6 @@ impl Channel {
             }
             Err(error) => {
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
-                // Surface the error to the user so they know what went wrong
-                let error_message = format!("⚠️ Something went wrong: {error}");
-                if let Err(send_err) = self
-                    .response_tx
-                    .send(OutboundResponse::Text(error_message))
-                    .await
-                {
-                    tracing::error!(%send_err, channel_id = %self.id, "failed to send error message to user");
-                }
             }
         }
 
@@ -1637,10 +1348,15 @@ impl Channel {
                     self.branch_reply_targets.remove(branch_id);
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
                 } else {
-                    // Regular branch: inject conclusion into history
-                    let mut history = self.state.history.write().await;
-                    let branch_message = format!("[Branch result]: {conclusion}");
-                    history.push(rig::message::Message::from(branch_message));
+                    // Regular branch: accumulate result for the next retrigger.
+                    // The result text will be embedded directly in the retrigger
+                    // message so the LLM knows exactly which process produced it.
+                    self.pending_results.push(PendingResult {
+                        process_type: "branch",
+                        process_id: branch_id.to_string(),
+                        result: conclusion.clone(),
+                        success: true,
+                    });
                     should_retrigger = true;
 
                     if let Some(message_id) = self.branch_reply_targets.remove(branch_id) {
@@ -1650,16 +1366,23 @@ impl Channel {
                         );
                     }
 
-                    tracing::info!(branch_id = %branch_id, "branch result incorporated");
+                    tracing::info!(branch_id = %branch_id, "branch result queued for retrigger");
                 }
             }
             ProcessEvent::WorkerStarted {
                 worker_id,
                 channel_id,
                 task,
+                worker_type,
                 ..
             } => {
-                run_logger.log_worker_started(channel_id.as_ref(), *worker_id, task);
+                run_logger.log_worker_started(
+                    channel_id.as_ref(),
+                    *worker_id,
+                    task,
+                    worker_type,
+                    &self.deps.agent_id,
+                );
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
@@ -1670,39 +1393,10 @@ impl Channel {
                 worker_id,
                 result,
                 notify,
+                success,
                 ..
             } => {
-                let artifacts = parse_artifact_tags(result);
-                if !artifacts.is_empty() {
-                    for artifact in &artifacts {
-                        if let Err(error) =
-                            persist_channel_artifact(&self.deps.sqlite_pool, &self.id, artifact)
-                                .await
-                        {
-                            tracing::warn!(
-                                %error,
-                                channel_id = %self.id,
-                                artifact_id = %artifact.id,
-                                "failed to persist worker artifact",
-                            );
-                        } else {
-                            emit_artifact_created_event(
-                                &self.deps.api_event_tx,
-                                &self.deps.agent_id,
-                                &self.id,
-                                artifact,
-                            );
-                        }
-                    }
-                }
-
-                let worker_result = if artifacts.is_empty() {
-                    result.clone()
-                } else {
-                    strip_artifact_tags(result)
-                };
-
-                run_logger.log_worker_completed(*worker_id, &worker_result);
+                run_logger.log_worker_completed(*worker_id, result, *success);
 
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
@@ -1712,13 +1406,18 @@ impl Channel {
                 self.state.worker_inputs.write().await.remove(worker_id);
 
                 if *notify {
-                    let mut history = self.state.history.write().await;
-                    let worker_message = format!("[Worker completed]: {worker_result}");
-                    history.push(rig::message::Message::from(worker_message));
+                    // Accumulate result for the next retrigger instead of
+                    // injecting into history as a fake user message.
+                    self.pending_results.push(PendingResult {
+                        process_type: "worker",
+                        process_id: worker_id.to_string(),
+                        result: result.clone(),
+                        success: *success,
+                    });
                     should_retrigger = true;
                 }
 
-                tracing::info!(worker_id = %worker_id, "worker completed");
+                tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
             }
             _ => {}
         }
@@ -1734,6 +1433,28 @@ impl Channel {
                     max = MAX_RETRIGGERS_PER_TURN,
                     "retrigger cap reached, suppressing further retriggers until next user message"
                 );
+                // Drain any pending results into history as assistant messages
+                // so they aren't silently lost when the cap prevents a retrigger.
+                if !self.pending_results.is_empty() {
+                    let results = std::mem::take(&mut self.pending_results);
+                    let mut history = self.state.history.write().await;
+                    for r in &results {
+                        let status = if r.success { "completed" } else { "failed" };
+                        let summary = format!(
+                            "[Background {} {} {}]: {}",
+                            r.process_type, r.process_id, status, r.result
+                        );
+                        history.push(rig::message::Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(rig::message::AssistantContent::text(summary)),
+                        });
+                    }
+                    tracing::info!(
+                        channel_id = %self.id,
+                        count = results.len(),
+                        "injected capped results into history as assistant messages"
+                    );
+                }
             } else {
                 self.pending_retrigger = true;
                 // Merge metadata (later events override earlier ones for the same key)
@@ -1752,39 +1473,107 @@ impl Channel {
 
     /// Flush the pending retrigger: send a synthetic system message to re-trigger
     /// the channel LLM so it can process background results and respond.
+    ///
+    /// Drains `pending_results` and embeds them directly in the retrigger message
+    /// so the LLM sees exactly which process(es) completed and what they returned.
+    /// No result text is left floating in history as an ambiguous user message.
+    ///
+    /// Results are drained only after the synthetic message is queued
+    /// successfully. On transient failures, retrigger state is kept and retried
+    /// so background results are not silently lost.
     async fn flush_pending_retrigger(&mut self) {
         self.retrigger_deadline = None;
 
         if !self.pending_retrigger {
             return;
         }
-        self.pending_retrigger = false;
-        let metadata = std::mem::take(&mut self.pending_retrigger_metadata);
 
         let Some(conversation_id) = &self.conversation_id else {
+            tracing::warn!(
+                channel_id = %self.id,
+                "retrigger pending but conversation_id is missing, dropping pending results"
+            );
+            self.pending_retrigger = false;
+            self.pending_retrigger_metadata.clear();
+            self.pending_results.clear();
             return;
         };
 
-        self.retrigger_count += 1;
-        tracing::info!(
-            channel_id = %self.id,
-            retrigger_count = self.retrigger_count,
-            "firing debounced retrigger"
-        );
+        if self.pending_results.is_empty() {
+            tracing::warn!(
+                channel_id = %self.id,
+                "retrigger fired but no pending results to relay"
+            );
+            self.pending_retrigger = false;
+            self.pending_retrigger_metadata.clear();
+            return;
+        }
+
+        let result_count = self.pending_results.len();
+
+        // Build per-result summaries for the template.
+        let result_items: Vec<_> = self
+            .pending_results
+            .iter()
+            .map(|r| crate::prompts::engine::RetriggerResult {
+                process_type: r.process_type.to_string(),
+                process_id: r.process_id.clone(),
+                success: r.success,
+                result: r.result.clone(),
+            })
+            .collect();
 
         let retrigger_message = match self
             .deps
             .runtime_config
             .prompts
             .load()
-            .render_system_retrigger()
+            .render_system_retrigger(&result_items)
         {
             Ok(message) => message,
             Err(error) => {
-                tracing::error!(%error, "failed to render retrigger message");
+                tracing::error!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to render retrigger message, retrying"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
                 return;
             }
         };
+
+        // Build a compact summary of the results to inject into history after
+        // a successful relay. This goes into metadata so handle_message can
+        // pull it out without re-parsing the template.
+        let result_summary = self
+            .pending_results
+            .iter()
+            .map(|r| {
+                let status = if r.success { "completed" } else { "failed" };
+                // Truncate very long results for the history record — the user
+                // already saw the full version via the reply tool.
+                let truncated = if r.result.len() > 500 {
+                    let boundary = r.result.floor_char_boundary(500);
+                    format!("{}... [truncated]", &r.result[..boundary])
+                } else {
+                    r.result.clone()
+                };
+                format!(
+                    "[{} {} {}]: {}",
+                    r.process_type, r.process_id, status, truncated
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut metadata = self.pending_retrigger_metadata.clone();
+        metadata.insert(
+            "retrigger_result_summary".to_string(),
+            serde_json::Value::String(result_summary),
+        );
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1797,8 +1586,41 @@ impl Channel {
             metadata,
             formatted_author: None,
         };
-        if let Err(error) = self.self_tx.try_send(synthetic) {
-            tracing::warn!(%error, "failed to re-trigger channel after process completion");
+        match self.self_tx.try_send(synthetic) {
+            Ok(()) => {
+                self.retrigger_count += 1;
+                tracing::info!(
+                    channel_id = %self.id,
+                    retrigger_count = self.retrigger_count,
+                    result_count,
+                    "firing debounced retrigger with {} result(s)",
+                    result_count,
+                );
+
+                self.pending_retrigger = false;
+                self.pending_retrigger_metadata.clear();
+                self.pending_results.clear();
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    result_count,
+                    "channel self queue is full, retrying retrigger"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    "failed to re-trigger channel: queue is closed, dropping pending results"
+                );
+                self.pending_retrigger = false;
+                self.pending_retrigger_metadata.clear();
+                self.pending_results.clear();
+            }
         }
     }
 
@@ -1965,10 +1787,13 @@ async fn spawn_branch(
     };
 
     let tool_server = crate::tools::create_branch_tool_server(
+        Some(state.clone()),
+        state.deps.agent_id.clone(),
+        state.deps.task_store.clone(),
         state.deps.memory_search.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
-        state.deps.document_search.clone(),
+        crate::conversation::ProcessRunLogger::new(state.deps.sqlite_pool.clone()),
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
 
@@ -2145,6 +1970,7 @@ pub async fn spawn_worker_from_state(
             worker_id,
             channel_id: Some(state.channel_id.clone()),
             task: task.clone(),
+            worker_type: "builtin".into(),
         })
         .ok();
 
@@ -2163,7 +1989,6 @@ pub async fn spawn_opencode_worker_from_state(
     task: impl Into<String>,
     directory: &str,
     interactive: bool,
-    model: Option<&str>,
 ) -> std::result::Result<crate::WorkerId, AgentError> {
     check_worker_limit(state).await?;
     ensure_dispatch_readiness(state, "opencode_worker");
@@ -2181,7 +2006,7 @@ pub async fn spawn_opencode_worker_from_state(
 
     let server_pool = rc.opencode_server_pool.clone();
 
-    let mut worker = if interactive {
+    let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
@@ -2208,25 +2033,8 @@ pub async fn spawn_opencode_worker_from_state(
         )
     };
 
-    // Apply model selection (priority: explicit model parameter > default model from config)
-    if let Some(model_name) = model {
-        // Explicit model override from spawn_worker call
-        tracing::debug!(
-            task = %task,
-            model = %model_name,
-            "OpenCode worker using explicit model"
-        );
-        worker = worker.with_model(model_name);
-    } else if let Some(default_model) = &opencode_config.default_model {
-        // Use default model from config
-        tracing::debug!(
-            task = %task,
-            model = %default_model,
-            "OpenCode worker using default model"
-        );
-        worker = worker.with_model(default_model.clone());
-    }
     let worker_id = worker.id;
+
     let worker_span = tracing::info_span!(
         "worker.run",
         worker_id = %worker_id,
@@ -2262,117 +2070,11 @@ pub async fn spawn_opencode_worker_from_state(
             worker_id,
             channel_id: Some(state.channel_id.clone()),
             task: opencode_task,
+            worker_type: "opencode".into(),
         })
         .ok();
 
     tracing::info!(worker_id = %worker_id, task = %task, "OpenCode worker spawned");
-
-    Ok(worker_id)
-}
-
-/// Spawn a CLI-backed worker for external coding agents (Factory Droid, Claude Code, etc.).
-///
-/// Instead of a Rig agent loop or OpenCode HTTP server, this spawns a one-shot
-/// CLI subprocess that receives the task via stdin and returns output on stdout.
-pub async fn spawn_cli_worker_from_state(
-    state: &ChannelState,
-    task: impl Into<String>,
-    directory: &str,
-    backend_name: &str,
-    interactive: bool,
-) -> std::result::Result<crate::WorkerId, AgentError> {
-    check_worker_limit(state).await?;
-    let task = task.into();
-    let directory = std::path::PathBuf::from(directory);
-
-    let rc = &state.deps.runtime_config;
-    let cli_config = rc.cli_workers.load();
-
-    if !cli_config.enabled {
-        return Err(AgentError::Other(anyhow::anyhow!(
-            "CLI workers are not enabled in config"
-        )));
-    }
-
-    let backend = cli_config
-        .backends
-        .get(backend_name)
-        .ok_or_else(|| {
-            AgentError::Other(anyhow::anyhow!(
-                "CLI backend '{}' not found. Available: {}",
-                backend_name,
-                cli_config
-                    .backends
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))
-        })?
-        .clone();
-
-    let worker = if interactive {
-        let (worker, input_tx) = crate::cli_worker::CliWorker::new_interactive(
-            Some(state.channel_id.clone()),
-            state.deps.agent_id.clone(),
-            &task,
-            directory,
-            backend_name,
-            backend,
-            state.deps.event_tx.clone(),
-        );
-        let worker_id = worker.id;
-        state
-            .worker_inputs
-            .write()
-            .await
-            .insert(worker_id, input_tx);
-        worker
-    } else {
-        crate::cli_worker::CliWorker::new(
-            Some(state.channel_id.clone()),
-            state.deps.agent_id.clone(),
-            &task,
-            directory,
-            backend_name,
-            backend,
-            state.deps.event_tx.clone(),
-        )
-    };
-
-    let worker_id = worker.id;
-
-    let handle = spawn_worker_task(
-        worker_id,
-        state.deps.event_tx.clone(),
-        state.deps.agent_id.clone(),
-        Some(state.channel_id.clone()),
-        async move {
-            let result = worker.run().await?;
-            Ok::<String, anyhow::Error>(result.result_text)
-        },
-    );
-
-    state.worker_handles.write().await.insert(worker_id, handle);
-
-    let cli_task = format!("[cli:{}] {}", backend_name, task);
-    {
-        let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, &cli_task, false);
-    }
-
-    state
-        .deps
-        .event_tx
-        .send(crate::ProcessEvent::WorkerStarted {
-            agent_id: state.deps.agent_id.clone(),
-            worker_id,
-            channel_id: Some(state.channel_id.clone()),
-            task: cli_task,
-        })
-        .ok();
-
-    tracing::info!(worker_id = %worker_id, backend = %backend_name, task = %task, "CLI worker spawned");
 
     Ok(worker_id)
 }
@@ -2403,11 +2105,11 @@ where
             .with_label_values(&[&*agent_id])
             .inc();
 
-        let (result_text, notify) = match future.await {
-            Ok(text) => (text, true),
+        let (result_text, notify, success) = match future.await {
+            Ok(text) => (text, true, true),
             Err(error) => {
                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                (format!("Worker failed: {error}"), true)
+                (format!("Worker failed: {error}"), true, false)
             }
         };
         #[cfg(feature = "metrics")]
@@ -2429,6 +2131,7 @@ where
             channel_id,
             result: result_text,
             notify,
+            success,
         });
     })
 }
@@ -2488,129 +2191,18 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
     None
 }
 
-#[derive(Debug, Clone)]
-struct ParsedArtifact {
-    id: String,
-    kind: String,
-    title: String,
-    content: String,
-}
-
-/// Parse `<artifact kind="..." title="...">...</artifact>` blocks from text.
-fn parse_artifact_tags(text: &str) -> Vec<ParsedArtifact> {
-    let mut results = Vec::new();
-    let mut pos = 0;
-
-    while let Some(rel_start) = text[pos..].find("<artifact") {
-        let start = pos + rel_start;
-
-        let Some(rel_tag_end) = text[start..].find('>') else {
-            break;
-        };
-        let tag_end = start + rel_tag_end + 1;
-        let tag = &text[start..tag_end];
-
-        let kind = extract_attr(tag, "kind").unwrap_or_else(|| "text".to_string());
-        let title = extract_attr(tag, "title").unwrap_or_else(|| "Document".to_string());
-        let id = extract_attr(tag, "id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        let Some(rel_close) = text[tag_end..].find("</artifact>") else {
-            break;
-        };
-        let content_end = tag_end + rel_close;
-        let content = text[tag_end..content_end].trim().to_string();
-
-        results.push(ParsedArtifact {
-            id,
-            kind,
-            title,
-            content,
-        });
-        pos = content_end + "</artifact>".len();
-    }
-
-    results
-}
-
-/// Remove all `<artifact>...</artifact>` blocks and return remaining text.
-fn strip_artifact_tags(text: &str) -> String {
-    let mut result = text.to_string();
-
-    loop {
-        let Some(start) = result.find("<artifact") else {
-            break;
-        };
-        let Some(rel_close) = result[start..].find("</artifact>") else {
-            break;
-        };
-        let end = start + rel_close + "</artifact>".len();
-        result.replace_range(start..end, "");
-    }
-
-    result.trim().to_string()
-}
-
-fn extract_attr(tag: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    let start = tag.find(&pattern)? + pattern.len();
-    let end = tag[start..].find('"')?;
-    Some(tag[start..start + end].to_string())
-}
-
-async fn persist_channel_artifact(
-    sqlite_pool: &sqlx::SqlitePool,
-    channel_id: &ChannelId,
-    artifact: &ParsedArtifact,
-) -> std::result::Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO artifacts (id, channel_id, kind, title, content, metadata, version, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) \
-         ON CONFLICT(id) DO UPDATE SET \
-            kind = excluded.kind, \
-            title = excluded.title, \
-            content = excluded.content, \
-            metadata = excluded.metadata, \
-            version = artifacts.version + 1, \
-            updated_at = CURRENT_TIMESTAMP",
-    )
-    .bind(&artifact.id)
-    .bind(channel_id.as_ref())
-    .bind(&artifact.kind)
-    .bind(&artifact.title)
-    .bind(&artifact.content)
-    .bind(Option::<String>::None)
-    .execute(sqlite_pool)
-    .await?;
-
-    Ok(())
-}
-
-fn emit_artifact_created_event(
-    api_event_tx: &Option<tokio::sync::broadcast::Sender<crate::api::ApiEvent>>,
-    agent_id: &crate::AgentId,
-    channel_id: &ChannelId,
-    artifact: &ParsedArtifact,
-) {
-    let Some(api_event_tx) = api_event_tx else {
-        return;
-    };
-
-    let _ = api_event_tx.send(crate::api::ApiEvent::ArtifactCreated {
-        agent_id: agent_id.to_string(),
-        channel_id: channel_id.to_string(),
-        artifact_id: artifact.id.clone(),
-        kind: artifact.kind.clone(),
-        title: artifact.title.clone(),
-    });
-}
-
 /// Format a user message with sender attribution from message metadata.
 ///
 /// In multi-user channels, this lets the LLM distinguish who said what.
 /// System-generated messages (re-triggers) are passed through as-is.
 fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
     if message.source == "system" {
-        return raw_text.to_string();
+        // System messages should never be empty, but guard against it
+        return if raw_text.trim().is_empty() {
+            "[system event]".to_string()
+        } else {
+            raw_text.to_string()
+        };
     }
 
     // Use platform-formatted author if available, fall back to metadata
@@ -2643,7 +2235,8 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         .map(|author| {
             let content_preview = message
                 .metadata
-                .get("reply_to_content")
+                .get("reply_to_text")
+                .or_else(|| message.metadata.get("reply_to_content"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if content_preview.is_empty() {
@@ -2654,7 +2247,15 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         })
         .unwrap_or_default();
 
-    format!("{display_name}{bot_tag}{reply_context}: {raw_text}")
+    // If raw_text is empty or just whitespace, use a placeholder to avoid
+    // sending empty text content blocks to the LLM API.
+    let text_content = if raw_text.trim().is_empty() {
+        "[attachment or empty message]"
+    } else {
+        raw_text
+    };
+
+    format!("{display_name}{bot_tag}{reply_context}: {text_content}")
 }
 
 fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
@@ -2707,8 +2308,6 @@ const TEXT_MIME_PREFIXES: &[&str] = &[
     "application/yaml",
 ];
 
-const LOCAL_ATTACHMENT_URL_PREFIX: &str = "spacebot-file://";
-
 /// Download attachments and convert them to LLM-ready UserContent parts.
 ///
 /// Images become `UserContent::Image` (base64). Text files get inlined.
@@ -2729,9 +2328,9 @@ async fn download_attachments(
             .any(|p| attachment.mime_type.starts_with(p));
 
         let content = if is_image {
-            download_image_attachment(deps, http, attachment).await
+            download_image_attachment(http, attachment).await
         } else if is_text {
-            download_text_attachment(deps, http, attachment).await
+            download_text_attachment(http, attachment).await
         } else if attachment.mime_type.starts_with("audio/") {
             transcribe_audio_attachment(deps, http, attachment).await
         } else {
@@ -2753,32 +2352,9 @@ async fn download_attachments(
 
 /// Download an image attachment and encode it as base64 for the LLM.
 async fn download_image_attachment(
-    deps: &AgentDeps,
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    match resolve_local_attachment_path(deps, attachment).await {
-        Ok(Some(local_path)) => {
-            let bytes = match tokio::fs::read(&local_path).await {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!(%error, filename = %attachment.filename, path = %local_path.display(), "failed to read local image");
-                    return UserContent::text(format!(
-                        "[Failed to read local image: {}]",
-                        attachment.filename
-                    ));
-                }
-            };
-
-            use base64::Engine as _;
-            let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let media_type = ImageMediaType::from_mime_type(&attachment.mime_type);
-            return UserContent::image_base64(base64_data, media_type, None);
-        }
-        Ok(None) => {}
-        Err(error_text) => return UserContent::text(error_text),
-    }
-
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
@@ -2821,17 +2397,6 @@ async fn transcribe_audio_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    match resolve_local_attachment_path(deps, attachment).await {
-        Ok(Some(local_path)) => {
-            return UserContent::text(format!(
-                "[Voice/audio message saved to: {}] (Use transcribe.sh to transcribe it, then respond to the content)",
-                local_path.display()
-            ));
-        }
-        Ok(None) => {}
-        Err(error_text) => return UserContent::text(error_text),
-    }
-
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
@@ -3053,42 +2618,9 @@ fn extract_transcript_text(body: &serde_json::Value) -> String {
 
 /// Download a text attachment and inline its content for the LLM.
 async fn download_text_attachment(
-    deps: &AgentDeps,
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    match resolve_local_attachment_path(deps, attachment).await {
-        Ok(Some(local_path)) => {
-            let content = match tokio::fs::read_to_string(&local_path).await {
-                Ok(content) => content,
-                Err(error) => {
-                    tracing::warn!(%error, filename = %attachment.filename, path = %local_path.display(), "failed to read local text file");
-                    return UserContent::text(format!(
-                        "[Failed to read local file: {}]",
-                        attachment.filename
-                    ));
-                }
-            };
-
-            let truncated = if content.len() > 50_000 {
-                format!(
-                    "{}...\n[truncated — {} bytes total]",
-                    &content[..50_000],
-                    content.len()
-                )
-            } else {
-                content
-            };
-
-            return UserContent::text(format!(
-                "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
-                attachment.filename, attachment.mime_type, truncated
-            ));
-        }
-        Ok(None) => {}
-        Err(error_text) => return UserContent::text(error_text),
-    }
-
     let response = match http.get(&attachment.url).send().await {
         Ok(r) => r,
         Err(error) => {
@@ -3131,72 +2663,20 @@ async fn download_text_attachment(
     ))
 }
 
-fn decode_local_attachment_url(url: &str) -> Option<String> {
-    let encoded_path = url.strip_prefix(LOCAL_ATTACHMENT_URL_PREFIX)?;
-    use base64::Engine as _;
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(encoded_path)
-        .ok()?;
-    String::from_utf8(decoded).ok()
-}
-
-async fn resolve_local_attachment_path(
-    deps: &AgentDeps,
-    attachment: &crate::Attachment,
-) -> std::result::Result<Option<std::path::PathBuf>, String> {
-    let Some(decoded_path) = decode_local_attachment_url(&attachment.url) else {
-        return Ok(None);
-    };
-
-    let canonical_path = tokio::fs::canonicalize(&decoded_path)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, filename = %attachment.filename, path = %decoded_path, "failed to canonicalize local attachment path");
-            format!("[Failed to resolve local attachment: {}]", attachment.filename)
-        })?;
-
-    if !canonical_path.starts_with(&deps.runtime_config.workspace_dir) {
-        tracing::warn!(
-            filename = %attachment.filename,
-            path = %canonical_path.display(),
-            workspace = %deps.runtime_config.workspace_dir.display(),
-            "rejected local attachment outside workspace"
-        );
-        return Err(format!(
-            "[Rejected local attachment outside workspace: {}]",
-            attachment.filename
-        ));
-    }
-
-    let metadata = tokio::fs::metadata(&canonical_path)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, filename = %attachment.filename, path = %canonical_path.display(), "failed to stat local attachment");
-            format!("[Failed to read local attachment: {}]", attachment.filename)
-        })?;
-
-    if !metadata.is_file() {
-        tracing::warn!(filename = %attachment.filename, path = %canonical_path.display(), "local attachment path is not a file");
-        return Err(format!(
-            "[Rejected local attachment path (not a file): {}]",
-            attachment.filename
-        ));
-    }
-
-    Ok(Some(canonical_path))
-}
-
 /// Write history back after the agentic loop completes.
 ///
 /// On success or `MaxTurnsError`, the history Rig built is consistent and safe
-/// to keep. On `PromptCancelled` or hard errors, it must be rolled back:
+/// to keep.
 ///
-/// - `PromptCancelled`: Rig snapshots history *before* the tool batch runs, so
-///   the carried history has the assistant's tool-call message but no tool
-///   results. Writing it back leaves a dangling tool-call that poisons every
-///   subsequent turn with "tool call result does not follow tool call (2013)".
-/// - Hard errors: Rig mutates history in-place and may have appended a
-///   tool-call message before the error was raised.
+/// On `PromptCancelled` (e.g. reply tool fired), Rig's carried history has
+/// the user prompt + the assistant's tool-call message but no tool results.
+/// Writing it back wholesale would leave a dangling tool-call that poisons
+/// every subsequent turn. Instead, we preserve only the **first user text
+/// message** Rig appended (the real user prompt), while discarding assistant
+/// tool-call messages and tool-result user messages.
+///
+/// On hard errors, we truncate to the pre-turn snapshot since the history
+/// state is unpredictable.
 ///
 /// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
 /// before raising it, so history is consistent.
@@ -3206,19 +2686,66 @@ fn apply_history_after_turn(
     history: Vec<rig::message::Message>,
     history_len_before: usize,
     channel_id: &str,
+    is_retrigger: bool,
 ) {
     match result {
         Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
             *guard = history;
         }
-        Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
+        Err(rig::completion::PromptError::PromptCancelled { .. }) => {
+            // Rig appended the user prompt and possibly an assistant tool-call
+            // message to history before cancellation. We keep only the first
+            // user text message (the actual user prompt) and discard everything else
+            // (assistant tool-calls without results, tool-result user messages).
+            //
+            // Exception: retrigger turns. The "user prompt" Rig pushed is actually
+            // the synthetic system retrigger message (internal template scaffolding),
+            // not a real user message. We inject a proper summary record separately
+            // in handle_message, so don't preserve anything from retrigger turns.
+            if is_retrigger {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    rolled_back = history.len().saturating_sub(history_len_before),
+                    "discarding retrigger turn history (summary injected separately)"
+                );
+                return;
+            }
+            let new_messages = &history[history_len_before..];
+            let mut preserved = 0usize;
+            if let Some(message) = new_messages.iter().find(|m| is_user_text_message(m)) {
+                guard.push(message.clone());
+                preserved = 1;
+            }
+            // Skip: Assistant messages (contain tool calls without results),
+            // user ToolResult messages, and internal correction prompts.
+            tracing::debug!(
+                channel_id = %channel_id,
+                total_new = new_messages.len(),
+                preserved,
+                discarded = new_messages.len() - preserved,
+                "selectively preserved first user message after PromptCancelled"
+            );
+        }
+        Err(_) => {
+            // Hard errors: history state is unpredictable, truncate to snapshot.
             tracing::debug!(
                 channel_id = %channel_id,
                 rolled_back = history.len().saturating_sub(history_len_before),
-                "rolling back history after cancelled or failed turn"
+                "rolling back history after failed turn"
             );
             guard.truncate(history_len_before);
         }
+    }
+}
+
+/// Returns true if a message is a User message containing only text content
+/// (i.e., an actual user prompt, not a tool result).
+fn is_user_text_message(message: &rig::message::Message) -> bool {
+    match message {
+        rig::message::Message::User { content } => content
+            .iter()
+            .all(|c| matches!(c, rig::message::UserContent::Text(_))),
+        _ => false,
     }
 }
 
@@ -3268,6 +2795,7 @@ mod tests {
             history.clone(),
             len_before,
             "test",
+            false,
         );
 
         assert_eq!(guard, history);
@@ -3286,20 +2814,21 @@ mod tests {
             prompt: Box::new(user_msg("prompt")),
         });
 
-        apply_history_after_turn(&err, &mut guard, history.clone(), len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history.clone(), len_before, "test", false);
 
         assert_eq!(guard, history);
     }
 
-    /// PromptCancelled carries history missing tool results — roll back to snapshot.
+    /// PromptCancelled preserves user text messages but discards assistant
+    /// tool-call messages (which have no matching tool results).
     #[test]
-    fn prompt_cancelled_rolls_back() {
+    fn prompt_cancelled_preserves_user_prompt() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        // Rig appended a tool-call message before cancelling — simulated by
-        // the longer history passed as `history`.
+        // Simulate what Rig does: push user prompt + assistant tool-call
         let mut history = initial.clone();
-        history.push(user_msg("[dangling tool-call]"));
+        history.push(user_msg("new user prompt")); // should be preserved
+        history.push(assistant_msg("tool call without result")); // should be discarded
         let len_before = initial.len();
 
         let err = Err(PromptError::PromptCancelled {
@@ -3307,11 +2836,111 @@ mod tests {
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        // User prompt should be preserved, assistant tool-call discarded
+        let mut expected = initial;
+        expected.push(user_msg("new user prompt"));
+        assert_eq!(
+            guard, expected,
+            "user text messages should be preserved, assistant messages discarded"
+        );
+    }
+
+    /// PromptCancelled discards tool-result User messages (ToolResult content).
+    #[test]
+    fn prompt_cancelled_discards_tool_results() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("new user prompt")); // preserved
+        // Simulate an assistant tool-call followed by a tool-result user message
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "hello"}),
+            )),
+        });
+        // A tool-result message is a User message with ToolResult content —
+        // is_user_text_message returns false for these, so they get discarded.
+        history.push(Message::User {
+            content: rig::OneOrMany::one(rig::message::UserContent::ToolResult(
+                rig::message::ToolResult {
+                    id: "call_1".to_string(),
+                    call_id: None,
+                    content: rig::OneOrMany::one(rig::message::ToolResultContent::text("ok")),
+                },
+            )),
+        });
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        let mut expected = initial;
+        expected.push(user_msg("new user prompt"));
+        assert_eq!(
+            guard, expected,
+            "tool-call and tool-result messages should be discarded"
+        );
+    }
+
+    /// PromptCancelled preserves only the first user prompt and drops any
+    /// internal correction prompts that may have been appended on retry.
+    #[test]
+    fn prompt_cancelled_preserves_only_first_user_prompt() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("real user prompt")); // preserved
+        history.push(assistant_msg("bad tool syntax"));
+        history.push(user_msg("Please proceed and use the available tools.")); // dropped
+        history.push(assistant_msg("tool call without result"));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        let mut expected = initial;
+        expected.push(user_msg("real user prompt"));
+        assert_eq!(
+            guard, expected,
+            "only the first user prompt should be preserved"
+        );
+    }
+
+    /// PromptCancelled on retrigger turns discards everything — the synthetic
+    /// system message is internal scaffolding, not a real user message.
+    /// A summary record is injected separately in handle_message.
+    #[test]
+    fn prompt_cancelled_retrigger_discards_all() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg("relaying result..."));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
 
         assert_eq!(
             guard, initial,
-            "history should be rolled back to pre-turn snapshot"
+            "retrigger turns should discard all new messages"
         );
     }
 
@@ -3328,7 +2957,7 @@ mod tests {
             CompletionError::ResponseError("API error".to_string()),
         ));
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -3349,7 +2978,7 @@ mod tests {
             "nonexistent_tool".to_string(),
         )));
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -3369,7 +2998,7 @@ mod tests {
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert!(
             guard.is_empty(),
@@ -3391,7 +3020,7 @@ mod tests {
             reason: "skip delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -3399,16 +3028,26 @@ mod tests {
         );
     }
 
-    /// After rollback, the next turn starts clean with no dangling messages.
+    /// After PromptCancelled, the next turn starts clean with user messages
+    /// preserved but no dangling assistant tool-calls.
     #[test]
     fn next_turn_is_clean_after_prompt_cancelled() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
         let mut poisoned_history = initial.clone();
-        poisoned_history.push(user_msg("[dangling tool-call without result]"));
+        // Rig appends: user prompt + assistant tool-call (dangling, no result)
+        poisoned_history.push(user_msg("what's up"));
+        poisoned_history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "hey!"}),
+            )),
+        });
         let len_before = initial.len();
 
-        // First turn: cancelled (reply tool fired)
+        // First turn: cancelled (reply tool fired) — not a retrigger
         apply_history_after_turn(
             &Err(PromptError::PromptCancelled {
                 chat_history: Box::new(poisoned_history.clone()),
@@ -3418,6 +3057,18 @@ mod tests {
             poisoned_history,
             len_before,
             "test",
+            false,
+        );
+
+        // User prompt preserved, assistant tool-call discarded
+        assert_eq!(
+            guard.len(),
+            initial.len() + 1,
+            "user prompt should be preserved"
+        );
+        assert!(
+            matches!(&guard[guard.len() - 1], Message::User { .. }),
+            "last message should be the preserved user prompt"
         );
 
         // Second turn: new user message appended, successful response
@@ -3432,22 +3083,19 @@ mod tests {
             history2.clone(),
             len_before2,
             "test",
+            false,
         );
 
         assert_eq!(
             guard, history2,
             "second turn should succeed with clean history"
         );
-        // Crucially: no dangling tool-call in history
+        // No dangling tool-call assistant messages in history
         let has_dangling = guard.iter().any(|m| {
-            if let Message::User { content } = m {
-                content.iter().any(|c| {
-                    if let rig::message::UserContent::Text(t) = c {
-                        t.text.contains("dangling")
-                    } else {
-                        false
-                    }
-                })
+            if let Message::Assistant { content, .. } = m {
+                content
+                    .iter()
+                    .any(|c| matches!(c, rig::message::AssistantContent::ToolCall(_)))
             } else {
                 false
             }
@@ -3455,6 +3103,74 @@ mod tests {
         assert!(
             !has_dangling,
             "no dangling tool-call messages in history after rollback"
+        );
+    }
+
+    #[test]
+    fn format_user_message_handles_empty_text() {
+        use super::format_user_message;
+        use crate::{Arc, InboundMessage};
+        use chrono::Utc;
+        use std::collections::HashMap;
+
+        // Test empty text with user message
+        let message = InboundMessage {
+            id: "test".to_string(),
+            agent_id: Some(Arc::from("test_agent")),
+            sender_id: "user123".to_string(),
+            conversation_id: "conv".to_string(),
+            content: crate::MessageContent::Text("".to_string()),
+            source: "discord".to_string(),
+            metadata: HashMap::new(),
+            formatted_author: Some("TestUser".to_string()),
+            timestamp: Utc::now(),
+        };
+
+        let formatted = format_user_message("", &message);
+        assert!(
+            !formatted.trim().is_empty(),
+            "formatted message should not be empty"
+        );
+        assert!(
+            formatted.contains("[attachment or empty message]"),
+            "should use placeholder for empty text"
+        );
+
+        // Test whitespace-only text
+        let formatted_ws = format_user_message("   ", &message);
+        assert!(
+            formatted_ws.contains("[attachment or empty message]"),
+            "should use placeholder for whitespace-only text"
+        );
+
+        // Test empty system message
+        let system_message = InboundMessage {
+            id: "test".to_string(),
+            agent_id: Some(Arc::from("test_agent")),
+            sender_id: "system".to_string(),
+            conversation_id: "conv".to_string(),
+            content: crate::MessageContent::Text("".to_string()),
+            source: "system".to_string(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+            timestamp: Utc::now(),
+        };
+
+        let formatted_sys = format_user_message("", &system_message);
+        assert_eq!(
+            formatted_sys, "[system event]",
+            "system messages should use [system event] placeholder"
+        );
+
+        // Test normal message with text
+        let formatted_normal = format_user_message("hello", &message);
+        assert!(
+            formatted_normal.contains("hello"),
+            "normal messages should preserve text"
+        );
+        assert!(
+            !formatted_normal.contains("[attachment or empty message]"),
+            "normal messages should not use placeholder"
         );
     }
 }
