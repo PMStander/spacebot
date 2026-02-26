@@ -35,6 +35,9 @@ Save something important that came up during your thinking. If you discovered a 
 ### memory_delete
 Forget a memory by ID. Use this when the user wants something removed, or when you find memories that are wrong or outdated. Get memory IDs from memory_recall results. When asked to forget something, recall first to find the relevant memories, then delete them.
 
+### channel_recall
+Retrieve conversation transcript context from another channel. Use this when the channel needs prior discussion from a specific channel, or when you need to inspect available channels before choosing one. You can pass a channel name, partial name, or full channel ID.
+
 ### spawn_worker
 If the user wants something done now and it needs execution tools (shell, file, exec), spawn a worker. Give it a specific task description with enough context to work independently. The worker won't have the conversation history — it only knows what you tell it. If the user is describing something for later rather than requesting immediate action, save a **todo** memory instead.
 

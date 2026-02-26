@@ -116,6 +116,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/tool_syntax_correction") => {
             include_str!("../../prompts/en/fragments/system/tool_syntax_correction.md.j2")
         }
+        ("en", "fragments/system/runtime_context") => {
+            include_str!("../../prompts/en/fragments/system/runtime_context.md.j2")
+        }
 
         // Agent Communication Fragments
         ("en", "fragments/org_context") => {
