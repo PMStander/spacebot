@@ -356,6 +356,7 @@ pub async fn add_channel_tools(
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
     current_adapter: Option<String>,
+    slack_thread_ts: Option<&str>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -432,7 +433,7 @@ pub async fn add_channel_tools(
     handle.add_tool(ReactTool::new(response_tx.clone())).await?;
     if let Some(cron_tool) = cron_tool {
         let cron_tool = cron_tool.with_default_delivery_target(
-            default_delivery_target_for_conversation(&conversation_id),
+            default_delivery_target_for_conversation(&conversation_id, slack_thread_ts),
         );
         handle.add_tool(cron_tool).await?;
     }
@@ -443,7 +444,10 @@ pub async fn add_channel_tools(
     Ok(())
 }
 
-fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<String> {
+fn default_delivery_target_for_conversation(
+    conversation_id: &str,
+    slack_thread_ts: Option<&str>,
+) -> Option<String> {
     let parsed = crate::messaging::target::parse_delivery_target(conversation_id)?;
     match parsed.adapter.as_str() {
         // Cron channels can't receive broadcast delivery.
@@ -452,6 +456,15 @@ fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<Str
         // adapter is registered as "webchat". Remap so the manager can find it,
         // and pass the full original conversation_id as the target.
         "portal" => Some(format!("webchat:{conversation_id}")),
+        // For Slack, append the originating thread_ts so cron broadcasts land in
+        // the correct thread rather than posting top-level.
+        "slack" => {
+            let base = parsed.to_string();
+            match slack_thread_ts {
+                Some(ts) => Some(format!("{base}#thread:{ts}")),
+                None => Some(base),
+            }
+        }
         _ => Some(parsed.to_string()),
     }
 }

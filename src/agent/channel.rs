@@ -1449,6 +1449,13 @@ impl Channel {
             *reply_target = messages.iter().rev().find_map(extract_message_id);
         }
 
+        // Pin the inbound routing target from the last non-system message in the
+        // batch so the RoutedSender (and send_routed) carry the correct platform
+        // metadata (e.g. Slack thread_ts) for outbound responses.
+        if let Some(last_real) = messages.iter().rev().find(|m| m.source != "system") {
+            self.current_inbound = Some(last_real.clone());
+        }
+
         // Run agent turn with any image/audio attachments preserved
         let (result, skip_flag, replied_flag, _) = self
             .run_agent_turn(
@@ -2243,12 +2250,19 @@ impl Channel {
             .clone()
             .map(|tool| tool.with_originating_channel(conversation_id.to_string()));
 
-        let routed_sender = RoutedSender::new(
-            self.response_tx.clone(),
-            self.current_inbound
-                .clone()
-                .unwrap_or_else(InboundMessage::empty),
-        );
+        let current_inbound = self
+            .current_inbound
+            .clone()
+            .unwrap_or_else(InboundMessage::empty);
+        let routed_sender = RoutedSender::new(self.response_tx.clone(), current_inbound.clone());
+
+        // Extract Slack thread_ts from the current inbound message so cron
+        // delivery targets include the originating thread.
+        let slack_thread_ts = current_inbound
+            .metadata
+            .get("slack_thread_ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
@@ -2261,6 +2275,7 @@ impl Channel {
             send_agent_message_tool,
             allow_direct_reply,
             adapter.map(|s| s.to_string()),
+            slack_thread_ts.as_deref(),
         )
         .await
         {
@@ -2286,9 +2301,9 @@ impl Channel {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let _ = self
-            .send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
-            .await;
+        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+            .await
+            .ok();
 
         // Inject attachments as a user message before the text prompt
         if !attachment_content.is_empty() {
@@ -2654,9 +2669,9 @@ impl Channel {
         }
 
         // Ensure typing indicator is always cleaned up, even on error paths
-        let _ = self
-            .send_routed(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
-            .await;
+        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .await
+            .ok();
     }
 
     /// Handle a process event (branch results, worker completions, status updates).

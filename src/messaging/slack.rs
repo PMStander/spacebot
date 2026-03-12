@@ -1124,7 +1124,13 @@ impl Messaging for SlackAdapter {
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let session = self.session();
 
-        let channel_id = if let Some(user_id_str) = target.strip_prefix("dm:") {
+        // Parse an optional thread target encoded as `#thread:<ts>` suffix.
+        let (bare_target, thread_ts) = match target.split_once("#thread:") {
+            Some((prefix, ts)) if !ts.is_empty() => (prefix, Some(SlackTs(ts.to_string()))),
+            _ => (target, None),
+        };
+
+        let channel_id = if let Some(user_id_str) = bare_target.strip_prefix("dm:") {
             let open_req = SlackApiConversationsOpenRequest::new()
                 .with_users(vec![SlackUserId(user_id_str.to_string())]);
             let open_resp = session
@@ -1133,16 +1139,17 @@ impl Messaging for SlackAdapter {
                 .context("failed to open Slack DM conversation")?;
             open_resp.channel.id
         } else {
-            SlackChannelId(target.to_string())
+            SlackChannelId(bare_target.to_string())
         };
 
         match response {
             OutboundResponse::Text(text) => {
                 for chunk in split_message(&text, 12_000) {
-                    let req = SlackApiChatPostMessageRequest::new(
+                    let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
                         markdown_content(chunk),
                     );
+                    req = req.opt_thread_ts(thread_ts.clone());
                     session
                         .chat_post_message(&req)
                         .await
@@ -1158,7 +1165,8 @@ impl Messaging for SlackAdapter {
                         .with_text(text)
                         .with_blocks(slack_blocks)
                 };
-                let req = SlackApiChatPostMessageRequest::new(channel_id.clone(), content);
+                let mut req = SlackApiChatPostMessageRequest::new(channel_id.clone(), content);
+                req = req.opt_thread_ts(thread_ts.clone());
                 session
                     .chat_post_message(&req)
                     .await
